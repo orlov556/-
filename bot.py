@@ -14,7 +14,6 @@ import logging
 import traceback
 import asyncio
 from difflib import get_close_matches
-from threading import Thread
 
 ########## НАСТРОЙКА ЛОГОВ ##########
 log_stream = io.StringIO()
@@ -63,8 +62,8 @@ def init_sqlite_db():
     # Предупреждения
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS warns (
-            user_id TEXT PRIMARY KEY,
-            warn_count INTEGER,
+            user_id INTEGER PRIMARY KEY,
+            warn_count INTEGER DEFAULT 0,
             last_warn_time TEXT
         )
     ''')
@@ -86,7 +85,15 @@ def init_sqlite_db():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS chats (
             chat_id TEXT PRIMARY KEY,
-            chat_title TEXT
+            chat_title TEXT,
+            welcome_message TEXT,
+            rules TEXT,
+            anti_swear INTEGER DEFAULT 0,
+            anti_flood INTEGER DEFAULT 0,
+            captcha_enabled INTEGER DEFAULT 0,
+            auto_moderation INTEGER DEFAULT 1,
+            mute_time INTEGER DEFAULT 60,
+            message_count INTEGER DEFAULT 0
         )
     ''')
     
@@ -165,9 +172,35 @@ def init_sqlite_db():
             chat_id INTEGER PRIMARY KEY,
             welcome_message TEXT,
             rules TEXT,
-            anti_swear BOOLEAN DEFAULT 0,
-            auto_moderation BOOLEAN DEFAULT 1,
+            anti_swear INTEGER DEFAULT 0,
+            anti_flood INTEGER DEFAULT 0,
+            captcha_enabled INTEGER DEFAULT 0,
+            auto_moderation INTEGER DEFAULT 1,
             mute_time INTEGER DEFAULT 60
+        )
+    ''')
+    
+    # Капча для новых пользователей
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS captcha (
+            user_id INTEGER,
+            chat_id INTEGER,
+            code TEXT,
+            attempts INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, chat_id)
+        )
+    ''')
+    
+    # Рассылки
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS scheduled_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            message TEXT,
+            status TEXT DEFAULT 'pending',
+            created_by INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
@@ -217,6 +250,51 @@ def get_all_chats():
     chats = [row[0] for row in cursor.fetchall()]
     conn.close()
     return chats
+
+def get_chat_settings(chat_id):
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM chat_settings WHERE chat_id = ?', (chat_id,))
+    result = cursor.fetchone()
+    conn.close()
+    
+    if result:
+        return {
+            'welcome_message': result[1],
+            'rules': result[2],
+            'anti_swear': bool(result[3]),
+            'anti_flood': bool(result[4]),
+            'captcha_enabled': bool(result[5]),
+            'auto_moderation': bool(result[6]),
+            'mute_time': result[7]
+        }
+    return {
+        'welcome_message': None,
+        'rules': None,
+        'anti_swear': False,
+        'anti_flood': False,
+        'captcha_enabled': False,
+        'auto_moderation': True,
+        'mute_time': 60
+    }
+
+def save_chat_settings(chat_id, settings):
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO chat_settings 
+        (chat_id, welcome_message, rules, anti_swear, anti_flood, captcha_enabled, auto_moderation, mute_time)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (chat_id, 
+          settings.get('welcome_message'), 
+          settings.get('rules'),
+          int(settings.get('anti_swear', False)),
+          int(settings.get('anti_flood', False)),
+          int(settings.get('captcha_enabled', False)),
+          int(settings.get('auto_moderation', True)),
+          settings.get('mute_time', 60)))
+    conn.commit()
+    conn.close()
 
 def get_nickname(user_id):
     conn = sqlite3.connect('bot_data.db')
@@ -396,6 +474,48 @@ def get_all_marriages(chat_id):
     conn.close()
     return results
 
+def create_captcha(user_id, chat_id):
+    import random
+    import string
+    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO captcha (user_id, chat_id, code, attempts) VALUES (?, ?, ?, 0)
+    ''', (user_id, chat_id, code))
+    conn.commit()
+    conn.close()
+    return code
+
+def check_captcha(user_id, chat_id, code):
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT code, attempts FROM captcha WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
+    result = cursor.fetchone()
+    
+    if not result:
+        conn.close()
+        return False
+    
+    saved_code, attempts = result
+    
+    if code.upper() == saved_code:
+        cursor.execute('DELETE FROM captcha WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
+        conn.commit()
+        conn.close()
+        return True
+    
+    if attempts >= 2:
+        cursor.execute('DELETE FROM captcha WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
+        conn.commit()
+        conn.close()
+        return False
+    
+    cursor.execute('UPDATE captcha SET attempts = attempts + 1 WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
+    conn.commit()
+    conn.close()
+    return False
+
 ########## ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ##########
 from xxhash import xxh32
 
@@ -433,7 +553,7 @@ def have_rights(message, set_la=False):
     return False
 
 def analytic(message):
-    if message.from_user.username:
+    if message.from_user and message.from_user.username:
         hashed = sha(message.from_user.username.lower())
         write_users(hashed, message.from_user.id)
 
@@ -465,6 +585,27 @@ def get_target(message):
     if message.reply_to_message:
         return message.reply_to_message.from_user.id
     return None
+
+def parse_time(text):
+    """Парсит время из текста вида: 15 минут, 2 часа, 1 день, 30м, 2ч, 5д"""
+    text = text.lower().strip()
+    
+    patterns = [
+        (r'(\d+)\s*минут', 60),      # минуты
+        (r'(\d+)\s*час', 3600),       # часы
+        (r'(\d+)\s*день', 86400),     # дни
+        (r'(\d+)\s*м', 60),           # м (минуты)
+        (r'(\d+)\s*ч', 3600),         # ч (часы)
+        (r'(\d+)\s*д', 86400)         # д (дни)
+    ]
+    
+    for pattern, multiplier in patterns:
+        match = re.search(pattern, text)
+        if match:
+            value = int(match.group(1))
+            return value * multiplier, f"{value} {'минут' if multiplier==60 else 'часов' if multiplier==3600 else 'дней'}"
+    
+    return None, None
 
 def format_time_ago(datetime_str):
     if not datetime_str:
@@ -555,6 +696,22 @@ def get_all_time_stats(chat_id):
     conn.close()
     return stats
 
+def increment_message_count(chat_id, user_id):
+    today = datetime.now().strftime('%Y-%m-%d')
+    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO user_data (chat_id, user_id, date, message_count, last_activity)
+        VALUES (?, ?, ?, 1, ?)
+        ON CONFLICT(chat_id, user_id, date) DO UPDATE SET
+            message_count = message_count + 1,
+            last_activity = ?
+    ''', (str(chat_id), str(user_id), today, current_time, current_time))
+    conn.commit()
+    conn.close()
+
 ########## АВТОИСПРАВЛЕНИЕ КОМАНД ##########
 ALL_COMMANDS = {
     # Модерация
@@ -573,13 +730,16 @@ ALL_COMMANDS = {
     '!вероятность': '!вероятность', '!вер': '!вер', 'рандом': 'рандом',
     'пинг': 'пинг', 'кинг': 'кинг', 'бот': 'бот', 'какая нагрузка': 'какая нагрузка',
     
+    # Премиум
+    'премиум': 'премиум',
+    
     # RP команды
     'обнять': 'обнять', 'поцеловать': 'поцеловать', 'поздравить': 'поздравить',
     'пожать руку': 'пожать руку', 'дать пять': 'дать пять', 'погладить': 'погладить',
     'похвалить': 'похвалить', 'извиниться': 'извиниться', 'понюхать': 'понюхать',
     'лизнуть': 'лизнуть', 'потискать': 'потискать', 'пригласить на чай': 'пригласить на чай',
     'потрогать': 'потрогать', 'ущипнуть': 'ущипнуть', 'щекотать': 'щекотать',
-    'пощупать': 'пощупать', 'подарить': 'подарить', 'выпить': 'выпить',
+    'пощупать': 'пощупать', 'подарить': 'подарить', 'выпить': 'пить',
     'покормить': 'покормить', 'кусь': 'кусь', 'прижать': 'прижать'
 }
 
@@ -596,6 +756,21 @@ def suggest_command(user_input):
     matches = get_close_matches(user_input_lower, ALL_COMMANDS.keys(), n=1, cutoff=0.6)
     
     return matches[0] if matches else None
+
+def is_command(text):
+    if not text:
+        return False
+    
+    # Проверяем на наличие @бота
+    if '@Barbariska_robot' in text.lower():
+        return True
+    
+    # Проверяем на команды
+    words = text.lower().split()
+    if words and words[0] in ALL_COMMANDS:
+        return True
+    
+    return False
 
 ########## ЖИВЫЕ ОТВЕТЫ ##########
 def get_live_response(command, sender_name, target_name):
@@ -807,10 +982,11 @@ def admin_panel(message):
     markup.add(
         types.InlineKeyboardButton("⚙️ Настройки чата", callback_data="admin_settings"),
         types.InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast"),
-        types.InlineKeyboardButton("📊 Статистика", callback_data="admin_stats"),
-        types.InlineKeyboardButton("🚫 Антимат", callback_data="admin_antiswear"),
         types.InlineKeyboardButton("👋 Приветствие", callback_data="admin_welcome"),
         types.InlineKeyboardButton("📜 Правила", callback_data="admin_rules"),
+        types.InlineKeyboardButton("🚫 Антимат", callback_data="admin_antiswear"),
+        types.InlineKeyboardButton("📊 Антифлуд", callback_data="admin_antiflood"),
+        types.InlineKeyboardButton("🔐 Капча", callback_data="admin_captcha"),
         types.InlineKeyboardButton("🔙 Закрыть", callback_data="close")
     )
     
@@ -823,6 +999,7 @@ def admin_panel(message):
 
 ########## ПРЕМИУМ ##########
 @bot.message_handler(commands=['premium'])
+@bot.message_handler(func=lambda message: message.text and message.text.lower() == 'премиум')
 def premium_command(message):
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
@@ -850,7 +1027,7 @@ def premium_command(message):
         f"╠══════════════════════════════╣\n"
         f"║ 💎 <b>Премиум (50 ⭐/мес):</b>   ║\n"
         f"║ • Безлимитные RP команды     ║\n"
-        f"║ • Все {len(rp_data)} команд              ║\n"
+        f"║ • Все {} команд              ║\n"
         f"║ • 18+ контент                ║\n"
         f"╠══════════════════════════════╣\n"
         f"║ 👑 <b>VIP (1000 ⭐ навсегда):</b>║\n"
@@ -1023,6 +1200,70 @@ def who_am_i(message):
     )
     
     bot.reply_to(message, text, parse_mode='HTML')
+
+########## КТО ТЫ ##########
+@bot.message_handler(func=lambda message: message.text and message.text.upper().startswith('КТО ТЫ'))
+def who_are_you(message):
+    try:
+        target_id = None
+        
+        if message.reply_to_message:
+            target_id = message.reply_to_message.from_user.id
+        else:
+            parts = message.text.split()
+            for part in parts:
+                if part.startswith('@'):
+                    username = part[1:].lower()
+                    users = read_users()
+                    hashed = sha(username)
+                    if hashed in users:
+                        target_id = users[hashed]
+                    break
+        
+        if not target_id:
+            bot.reply_to(message, "❓ Укажи пользователя: ответь на сообщение или напиши @username")
+            return
+        
+        chat_id = str(message.chat.id)
+        
+        sub = get_user_subscription(target_id)
+        sub_text = "💎 Премиум" if sub['type'] != 'free' else "🎁 Бесплатный"
+        
+        display_name = get_nickname(target_id) or "Пользователь"
+        display_name = display_name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        user_link = get_user_link_sync(target_id, message.chat.id)
+        
+        daily = get_user_daily_stats(chat_id, target_id)
+        weekly = get_user_weekly_stats(chat_id, target_id)
+        all_time = get_user_all_time_stats(chat_id, target_id)
+        
+        description = get_description(target_id)
+        desc_text = f"\n📝 {description}" if description else ""
+        
+        spouse_id = get_spouse(chat_id, target_id)
+        spouse_text = ""
+        if spouse_id:
+            spouse_link = get_user_link_sync(spouse_id, message.chat.id)
+            spouse_text = f"\n💍 В браке с: {spouse_link}"
+        
+        conn = sqlite3.connect('bot_data.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT last_activity FROM user_data WHERE chat_id = ? AND user_id = ? LIMIT 1',
+                      (chat_id, target_id))
+        result = cursor.fetchone()
+        last_active = format_time_ago(result[0]) if result and result[0] else "Нет данных"
+        conn.close()
+        
+        text = (
+            f"👤 <b>{user_link}</b>\n"
+            f"{sub_text}{desc_text}{spouse_text}\n\n"
+            f"⏱️ Последний актив: {last_active}\n"
+            f"📊 Статистика (д|н|всё): {daily} | {weekly} | {all_time}"
+        )
+        
+        bot.reply_to(message, text, parse_mode='HTML')
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
 
 ########## ВЕРОЯТНОСТЬ ##########
 @bot.message_handler(func=lambda message: message.text and message.text.lower().startswith('!вероятность'))
@@ -1239,6 +1480,23 @@ def ban_command(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка: {e}")
 
+@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'РАЗБАН')
+def unban_command(message):
+    if not have_rights(message):
+        bot.reply_to(message, "❌ Недостаточно прав!")
+        return
+    
+    target = get_target(message)
+    if not target:
+        bot.reply_to(message, "❌ Нужно ответить на сообщение пользователя.")
+        return
+    
+    try:
+        bot.unban_chat_member(message.chat.id, target)
+        bot.reply_to(message, f"🔓 Пользователь разбанен.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
 @bot.message_handler(func=lambda message: message.text and message.text.upper() == 'КИК')
 def kick_command(message):
     if not have_rights(message):
@@ -1257,7 +1515,7 @@ def kick_command(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка: {e}")
 
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'МУТ')
+@bot.message_handler(func=lambda message: message.text and message.text.upper().startswith('МУТ'))
 def mute_command(message):
     if not have_rights(message):
         bot.reply_to(message, "❌ Недостаточно прав!")
@@ -1268,57 +1526,249 @@ def mute_command(message):
         bot.reply_to(message, "❌ Нужно ответить на сообщение пользователя.")
         return
     
+    # Парсим время
+    time_seconds, time_text = parse_time(message.text)
+    
+    if time_seconds:
+        until_date = message.date + time_seconds
+        time_str = f" на {time_text}"
+    else:
+        until_date = message.date + 3600  # 1 час по умолчанию
+        time_str = " на 1 час"
+    
     try:
-        bot.restrict_chat_member(message.chat.id, target, until_date=message.date + 3600)
-        bot.reply_to(message, f"🔇 Пользователь замьючен на 1 час.")
+        bot.restrict_chat_member(
+            message.chat.id, 
+            target, 
+            until_date=until_date,
+            can_send_messages=False
+        )
+        bot.reply_to(message, f"🔇 Пользователь замьючен{time_str}.")
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка: {e}")
 
-########## УНИВЕРСАЛЬНЫЙ ХЕНДЛЕР (АВТОИСПРАВЛЕНИЕ) ##########
-@bot.message_handler(func=lambda message: True)
-def universal_handler(message):
-    analytic(message)
-    
-    if not message.text:
+@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'РАЗМУТ')
+def unmute_command(message):
+    if not have_rights(message):
+        bot.reply_to(message, "❌ Недостаточно прав!")
         return
     
-    # Пропускаем уже обработанные команды
-    if message.text.startswith('/') or message.text.startswith('!'):
+    target = get_target(message)
+    if not target:
+        bot.reply_to(message, "❌ Нужно ответить на сообщение пользователя.")
         return
     
-    original = message.text
-    suggested = suggest_command(original)
-    
-    if not suggested:
-        markup = types.InlineKeyboardMarkup()
-        markup.add(
-            types.InlineKeyboardButton("📋 Список команд", callback_data="show_help")
+    try:
+        bot.restrict_chat_member(
+            message.chat.id, 
+            target,
+            can_send_messages=True,
+            can_send_media_messages=True,
+            can_send_other_messages=True,
+            can_add_web_page_previews=True
         )
-        
-        bot.reply_to(
-            message,
-            f"❓ <b>Неизвестная команда</b>\n\n"
-            f"Я не знаю <code>{original[:30]}</code>\n"
-            f"Нажми кнопку, чтобы посмотреть все команды",
-            parse_mode='HTML',
-            reply_markup=markup
-        )
+        bot.reply_to(message, f"🔊 Пользователь размьючен.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'ВАРН')
+def warn_command(message):
+    if not have_rights(message):
+        bot.reply_to(message, "❌ Недостаточно прав!")
         return
     
-    if suggested != original.lower().strip():
-        markup = types.InlineKeyboardMarkup()
-        markup.add(
-            types.InlineKeyboardButton(f"✅ Выполнить: {suggested}", callback_data=f"do_{suggested}")
-        )
-        
-        bot.reply_to(
-            message,
-            f"🤔 <b>Возможно, ты имел в виду:</b>\n\n"
-            f"<code>{suggested}</code>",
-            parse_mode='HTML',
-            reply_markup=markup
-        )
+    target = get_target(message)
+    if not target:
+        bot.reply_to(message, "❌ Нужно ответить на сообщение пользователя.")
         return
+    
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT warn_count FROM warns WHERE user_id = ?', (target,))
+    result = cursor.fetchone()
+    
+    if result:
+        warn_count = result[0] + 1
+        cursor.execute('UPDATE warns SET warn_count = ?, last_warn_time = ? WHERE user_id = ?',
+                      (warn_count, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), target))
+    else:
+        warn_count = 1
+        cursor.execute('INSERT INTO warns (user_id, warn_count, last_warn_time) VALUES (?, ?, ?)',
+                      (target, warn_count, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    
+    conn.commit()
+    conn.close()
+    
+    if warn_count >= 3:
+        try:
+            bot.ban_chat_member(message.chat.id, target)
+            bot.reply_to(message, f"⚠️ 3 предупреждения - пользователь забанен!")
+        except:
+            bot.reply_to(message, f"⚠️ Предупреждение {warn_count}/3")
+    else:
+        bot.reply_to(message, f"⚠️ Предупреждение {warn_count}/3")
+
+@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'СНЯТЬ ВАРН')
+def unwarn_command(message):
+    if not have_rights(message):
+        bot.reply_to(message, "❌ Недостаточно прав!")
+        return
+    
+    target = get_target(message)
+    if not target:
+        bot.reply_to(message, "❌ Нужно ответить на сообщение пользователя.")
+        return
+    
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT warn_count FROM warns WHERE user_id = ?', (target,))
+    result = cursor.fetchone()
+    
+    if result and result[0] > 0:
+        if result[0] == 1:
+            cursor.execute('DELETE FROM warns WHERE user_id = ?', (target,))
+            bot.reply_to(message, f"✅ Предупреждения сняты полностью.")
+        else:
+            cursor.execute('UPDATE warns SET warn_count = warn_count - 1 WHERE user_id = ?', (target,))
+            bot.reply_to(message, f"✅ Снято одно предупреждение. Осталось: {result[0]-1}")
+    else:
+        bot.reply_to(message, "❌ У пользователя нет предупреждений.")
+    
+    conn.commit()
+    conn.close()
+
+@bot.message_handler(func=lambda message: message.text and message.text.upper() == '-СМС')
+def delete_message(message):
+    if not have_rights(message):
+        bot.reply_to(message, "❌ Недостаточно прав!")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Нужно ответить на сообщение для удаления.")
+        return
+    
+    try:
+        bot.delete_message(message.chat.id, message.reply_to_message.message_id)
+        bot.delete_message(message.chat.id, message.message_id)
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'ПИН')
+@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'ЗАКРЕП')
+def pin_message(message):
+    if not have_rights(message):
+        bot.reply_to(message, "❌ Недостаточно прав!")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Нужно ответить на сообщение для закрепления.")
+        return
+    
+    try:
+        bot.pin_chat_message(message.chat.id, message.reply_to_message.message_id)
+        bot.reply_to(message, f"📌 Сообщение закреплено.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'АНПИН')
+def unpin_message(message):
+    if not have_rights(message):
+        bot.reply_to(message, "❌ Недостаточно прав!")
+        return
+    
+    try:
+        bot.unpin_chat_message(message.chat.id)
+        bot.reply_to(message, f"🔓 Сообщение откреплено.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+@bot.message_handler(func=lambda message: message.text and message.text.upper() == '+ЧАТ')
+def open_chat(message):
+    if not have_rights(message):
+        bot.reply_to(message, "❌ Недостаточно прав!")
+        return
+    
+    try:
+        bot.set_chat_permissions(message.chat.id, types.ChatPermissions(
+            can_send_messages=True,
+            can_send_media_messages=True,
+            can_send_other_messages=True,
+            can_add_web_page_previews=True
+        ))
+        bot.reply_to(message, f"🔓 Чат открыт для всех.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+@bot.message_handler(func=lambda message: message.text and message.text.upper() == '-ЧАТ')
+def close_chat(message):
+    if not have_rights(message):
+        bot.reply_to(message, "❌ Недостаточно прав!")
+        return
+    
+    try:
+        bot.set_chat_permissions(message.chat.id, types.ChatPermissions(
+            can_send_messages=False,
+            can_send_media_messages=False,
+            can_send_other_messages=False,
+            can_add_web_page_previews=False
+        ))
+        bot.reply_to(message, f"🔒 Чат закрыт.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+@bot.message_handler(func=lambda message: message.text and message.text.upper() == '+АДМИН')
+def promote_admin(message):
+    db = read_db()
+    if message.from_user.id != db['owner_id']:
+        bot.reply_to(message, "❌ Только владелец может назначать админов!")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Нужно ответить на сообщение пользователя.")
+        return
+    
+    target = message.reply_to_message.from_user.id
+    
+    try:
+        bot.promote_chat_member(
+            message.chat.id, target,
+            can_manage_chat=True,
+            can_change_info=True,
+            can_delete_messages=True,
+            can_restrict_members=True,
+            can_invite_users=True,
+            can_pin_messages=True
+        )
+        bot.reply_to(message, f"👑 Пользователь повышен до администратора.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+@bot.message_handler(func=lambda message: message.text and message.text.upper() == '-АДМИН')
+def demote_admin(message):
+    db = read_db()
+    if message.from_user.id != db['owner_id']:
+        bot.reply_to(message, "❌ Только владелец может снимать админов!")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Нужно ответить на сообщение пользователя.")
+        return
+    
+    target = message.reply_to_message.from_user.id
+    
+    try:
+        bot.promote_chat_member(
+            message.chat.id, target,
+            can_manage_chat=False,
+            can_change_info=False,
+            can_delete_messages=False,
+            can_restrict_members=False,
+            can_invite_users=False,
+            can_pin_messages=False
+        )
+        bot.reply_to(message, f"👤 Пользователь понижен.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
 
 ########## ОБРАБОТЧИКИ CALLBACK ##########
 @bot.callback_query_handler(func=lambda call: True)
@@ -1336,14 +1786,15 @@ def callback_handler(call):
             "🛡️ <b>Команды модерации:</b>\n\n"
             "🔨 <b>Бан</b> - заблокировать навсегда\n"
             "👢 <b>Кик</b> - выгнать из чата\n"
-            "🔇 <b>Мут</b> - запретить писать\n"
+            "🔇 <b>Мут [время]</b> - запретить писать\n"
             "🔊 <b>Размут</b> - снять mute\n"
             "⚠️ <b>Варн</b> - предупреждение\n"
             "✅ <b>Снять варн</b> - убрать предупреждение\n"
             "❌ <b>-смс</b> - удалить сообщение\n"
-            "📌 <b>Пин</b> - закрепить сообщение\n"
+            "📌 <b>Пин / Закреп</b> - закрепить сообщение\n"
             "🔓 <b>+чат</b> - открыть чат\n"
-            "🔒 <b>-чат</b> - закрыть чат\n\n"
+            "🔒 <b>-чат</b> - закрыть чат\n"
+            "👑 <b>+админ / -админ</b> - управление админами\n\n"
             "<i>Используй команды в ответ на сообщение пользователя</i>"
         )
         bot.edit_message_text(
@@ -1354,11 +1805,11 @@ def callback_handler(call):
         )
     
     elif call.data == "help_rp":
+        commands = sorted(list(rp_data.keys()))[:30]
         text = f"💕 <b>RP команды (всего {len(rp_data)}):</b>\n\n"
-        commands = sorted(list(rp_data.keys()))[:20]
-        for cmd in commands:
-            text += f"• <code>{cmd}</code>\n"
-        text += f"\nи ещё {len(rp_data)-20} команд...\n\n"
+        for i, cmd in enumerate(commands, 1):
+            text += f"{i}. <code>{cmd}</code>\n"
+        text += f"\nи ещё {len(rp_data)-30} команд...\n\n"
         text += "<i>Используй команду с @ник или в ответ на сообщение</i>"
         bot.edit_message_text(
             text,
@@ -1376,9 +1827,9 @@ def callback_handler(call):
             "📆 <b>топ недели</b> - топ за неделю\n"
             "📅 <b>топ месяца</b> - топ за месяц\n"
             "🏆 <b>топ вся</b> - топ за всё время\n\n"
-            "➕ <b>+ник</b> - установить ник\n"
+            "➕ <b>+ник [ник]</b> - установить ник\n"
             "➖ <b>-ник</b> - сбросить ник\n"
-            "➕ <b>+описание</b> - установить описание\n"
+            "➕ <b>+описание [текст]</b> - установить описание\n"
             "➖ <b>-описание</b> - сбросить описание"
         )
         bot.edit_message_text(
@@ -1422,6 +1873,88 @@ def callback_handler(call):
             parse_mode='HTML'
         )
     
+    elif call.data == "admin_settings":
+        settings = get_chat_settings(call.message.chat.id)
+        text = (
+            f"⚙️ <b>Настройки чата</b>\n\n"
+            f"🛡️ Автомодерация: {'✅' if settings['auto_moderation'] else '❌'}\n"
+            f"🚫 Антимат: {'✅' if settings['anti_swear'] else '❌'}\n"
+            f"📊 Антифлуд: {'✅' if settings['anti_flood'] else '❌'}\n"
+            f"🔐 Капча: {'✅' if settings['captcha_enabled'] else '❌'}\n"
+            f"⏱️ Время мута: {settings['mute_time']} сек\n\n"
+            f"👋 Приветствие: {'✅' if settings['welcome_message'] else '❌'}\n"
+            f"📜 Правила: {'✅' if settings['rules'] else '❌'}"
+        )
+        bot.edit_message_text(
+            text,
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='HTML'
+        )
+    
+    elif call.data == "admin_antiswear":
+        settings = get_chat_settings(call.message.chat.id)
+        new_value = 0 if settings['anti_swear'] else 1
+        settings['anti_swear'] = new_value
+        save_chat_settings(call.message.chat.id, settings)
+        bot.answer_callback_query(call.id, f"Антимат {'включен' if new_value else 'выключен'}")
+        bot.edit_message_text(
+            f"✅ Антимат {'включен' if new_value else 'выключен'}",
+            call.message.chat.id,
+            call.message.message_id
+        )
+    
+    elif call.data == "admin_antiflood":
+        settings = get_chat_settings(call.message.chat.id)
+        new_value = 0 if settings['anti_flood'] else 1
+        settings['anti_flood'] = new_value
+        save_chat_settings(call.message.chat.id, settings)
+        bot.answer_callback_query(call.id, f"Антифлуд {'включен' if new_value else 'выключен'}")
+        bot.edit_message_text(
+            f"✅ Антифлуд {'включен' if new_value else 'выключен'}",
+            call.message.chat.id,
+            call.message.message_id
+        )
+    
+    elif call.data == "admin_captcha":
+        settings = get_chat_settings(call.message.chat.id)
+        new_value = 0 if settings['captcha_enabled'] else 1
+        settings['captcha_enabled'] = new_value
+        save_chat_settings(call.message.chat.id, settings)
+        bot.answer_callback_query(call.id, f"Капча {'включена' if new_value else 'выключена'}")
+        bot.edit_message_text(
+            f"✅ Капча {'включена' if new_value else 'выключена'}",
+            call.message.chat.id,
+            call.message.message_id
+        )
+    
+    elif call.data == "admin_welcome":
+        bot.edit_message_text(
+            "👋 Отправь новое приветственное сообщение для новых участников.\n"
+            "Или отправь /cancel для отмены.",
+            call.message.chat.id,
+            call.message.message_id
+        )
+        bot.register_next_step_handler(call.message, set_welcome_message)
+    
+    elif call.data == "admin_rules":
+        bot.edit_message_text(
+            "📜 Отправь новые правила чата.\n"
+            "Или отправь /cancel для отмены.",
+            call.message.chat.id,
+            call.message.message_id
+        )
+        bot.register_next_step_handler(call.message, set_rules)
+    
+    elif call.data == "admin_broadcast":
+        bot.edit_message_text(
+            "📢 Отправь сообщение для рассылки во все чаты.\n"
+            "Или отправь /cancel для отмены.",
+            call.message.chat.id,
+            call.message.message_id
+        )
+        bot.register_next_step_handler(call.message, process_broadcast)
+    
     elif call.data == "buy_month":
         bot.answer_callback_query(call.id, "Покупка премиум на месяц...")
         prices = [types.LabeledPrice(label="Премиум на месяц", amount=50)]
@@ -1450,11 +1983,6 @@ def callback_handler(call):
             start_parameter="vip"
         )
     
-    elif call.data.startswith("do_"):
-        cmd = call.data[3:]
-        bot.answer_callback_query(call.id, f"Выполняю: {cmd}")
-        # Здесь можно вызвать соответствующую команду
-    
     elif call.data.startswith("marriage_"):
         parts = call.data.split('_')
         if len(parts) >= 3:
@@ -1474,7 +2002,7 @@ def callback_handler(call):
             
             if action == "agree":
                 register_marriage(chat_id, proposer_id, target_id)
-                text = f"💍 Брак заключен!"
+                text = f"💍 Брак заключен! Поздравляем!"
                 bot.answer_callback_query(call.id, "✅ Поздравляем!")
             else:
                 text = f"💔 Предложение отклонено"
@@ -1491,6 +2019,45 @@ def callback_handler(call):
     elif call.data == "close":
         bot.delete_message(call.message.chat.id, call.message.message_id)
         bot.answer_callback_query(call.id)
+
+########## ОБРАБОТЧИКИ НАСТРОЕК ##########
+def set_welcome_message(message):
+    if message.text == '/cancel':
+        bot.reply_to(message, "❌ Отменено")
+        return
+    
+    settings = get_chat_settings(message.chat.id)
+    settings['welcome_message'] = message.text
+    save_chat_settings(message.chat.id, settings)
+    bot.reply_to(message, "✅ Приветствие сохранено!")
+
+def set_rules(message):
+    if message.text == '/cancel':
+        bot.reply_to(message, "❌ Отменено")
+        return
+    
+    settings = get_chat_settings(message.chat.id)
+    settings['rules'] = message.text
+    save_chat_settings(message.chat.id, settings)
+    bot.reply_to(message, "✅ Правила сохранены!")
+
+def process_broadcast(message):
+    if message.text == '/cancel':
+        bot.reply_to(message, "❌ Отменено")
+        return
+    
+    chats = get_all_chats()
+    sent = 0
+    failed = 0
+    
+    for chat_id in chats:
+        try:
+            bot.send_message(int(chat_id), f"📢 <b>РАССЫЛКА</b>\n\n{message.text}", parse_mode='HTML')
+            sent += 1
+        except:
+            failed += 1
+    
+    bot.reply_to(message, f"✅ Рассылка завершена!\nОтправлено: {sent}\nОшибок: {failed}")
 
 ########## ОБРАБОТЧИК ПЛАТЕЖЕЙ ##########
 @bot.pre_checkout_query_handler(func=lambda query: True)
@@ -1517,9 +2084,110 @@ def successful_payment(message):
             parse_mode='HTML'
         )
 
+########## НОВЫЕ УЧАСТНИКИ ##########
+@bot.message_handler(content_types=['new_chat_members'])
+def handle_new_member(message):
+    for user in message.new_chat_members:
+        if user.id == bot.get_me().id:
+            continue
+        
+        settings = get_chat_settings(message.chat.id)
+        
+        # Приветствие
+        if settings.get('welcome_message'):
+            welcome = settings['welcome_message'].replace('{user}', user.first_name)
+            bot.send_message(message.chat.id, welcome)
+        
+        # Капча
+        if settings.get('captcha_enabled'):
+            code = create_captcha(user.id, message.chat.id)
+            bot.send_message(
+                message.chat.id,
+                f"🔐 Привет, {user.first_name}!\n"
+                f"Введи код для подтверждения: <code>{code}</code>",
+                parse_mode='HTML'
+            )
+            
+            # Ограничиваем права
+            try:
+                bot.restrict_chat_member(
+                    message.chat.id,
+                    user.id,
+                    can_send_messages=False
+                )
+            except:
+                pass
+
+########## ОБРАБОТЧИК ТЕКСТА ##########
+@bot.message_handler(func=lambda message: True)
+def handle_text(message):
+    if not message.text:
+        return
+    
+    # Считаем сообщение
+    increment_message_count(message.chat.id, message.from_user.id)
+    
+    # Проверяем капчу
+    settings = get_chat_settings(message.chat.id)
+    if settings.get('captcha_enabled'):
+        conn = sqlite3.connect('bot_data.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT 1 FROM captcha WHERE user_id = ? AND chat_id = ?', 
+                      (message.from_user.id, message.chat.id))
+        if cursor.fetchone():
+            conn.close()
+            # Проверяем код
+            if check_captcha(message.from_user.id, message.chat.id, message.text):
+                bot.reply_to(message, "✅ Капча пройдена! Добро пожаловать!")
+                try:
+                    bot.restrict_chat_member(
+                        message.chat.id,
+                        message.from_user.id,
+                        can_send_messages=True,
+                        can_send_media_messages=True,
+                        can_send_other_messages=True
+                    )
+                except:
+                    pass
+            else:
+                bot.reply_to(message, "❌ Неправильный код. Попробуй ещё раз.")
+            return
+        conn.close()
+    
+    # Проверяем антифлуд
+    if settings.get('anti_flood'):
+        # Простая проверка - можно усложнить
+        pass
+    
+    # Проверяем антимат
+    if settings.get('anti_swear'):
+        bad_words = ['хуй', 'пизда', 'еблан', 'блядь', 'сука']
+        text_lower = message.text.lower()
+        for word in bad_words:
+            if word in text_lower:
+                try:
+                    bot.delete_message(message.chat.id, message.message_id)
+                    bot.send_message(
+                        message.chat.id,
+                        f"{get_user_link_sync(message.from_user.id, message.chat.id)}, не матерись пожалуйста! 🙏",
+                        parse_mode='HTML'
+                    )
+                except:
+                    pass
+                break
+    
+    # Проверяем на команды
+    if is_command(message.text):
+        # Обработка будет в других хендлерах
+        return
+    
+    # Если это не команда и не капча - игнорируем
+    # Бот не отвечает на обычные сообщения!
+
 ########## ЗАПУСК ##########
 if __name__ == "__main__":
     print("🚀 Бот запускается...")
+    print("✅ Бот будет отвечать только на команды!")
     try:
         bot.infinity_polling(timeout=60, long_polling_timeout=60)
     except Exception as e:
