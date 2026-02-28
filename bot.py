@@ -17,22 +17,44 @@ from telebot.types import InlineQueryResultArticle, InputTextMessageContent, Inl
 from requests.exceptions import ReadTimeout, ConnectionError
 from xxhash import xxh32
 
-# ==================== КОНФИГУРАЦИЯ ====================
+# ==================== КОНФИГУРАЦИЯ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ====================
 
-# Загружаем RP-команды
-with open('rp_commands.json', 'r', encoding='utf-8') as f:
-    RP_COMMANDS = json.load(f)['commands']
+# Токен бота - обязательно через переменную окружения!
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    print("❌ Ошибка: BOT_TOKEN не найден в переменных окружения!")
+    print("Добавь переменную BOT_TOKEN в настройках Railway")
+    exit(1)
+
+# Опционально: ID владельца и админа тоже можно через переменные
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))  # Если не указано, будет 0
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # Если не указано, будет 0
+
+print(f"✅ Бот запускается с токеном: {BOT_TOKEN[:5]}...")
+if OWNER_ID:
+    print(f"✅ Владелец ID: {OWNER_ID}")
+if ADMIN_ID:
+    print(f"✅ Админ ID: {ADMIN_ID}")
+
+# Загружаем RP-команды из файла
+try:
+    with open('rp_commands.json', 'r', encoding='utf-8') as f:
+        RP_COMMANDS = json.load(f)['commands']
+    print(f"✅ Загружено {len(RP_COMMANDS)} RP-команд")
+except Exception as e:
+    print(f"❌ Ошибка загрузки rp_commands.json: {e}")
+    RP_COMMANDS = {}
 
 # Настройки премиума
 PREMIUM_CONFIG = {
-    "free_commands": [  # Бесплатные RP-команды
+    "free_commands": [
         "обнять", "поцеловать", "поздравить", "пожать руку",
         "дать пять", "погладить", "похвалить", "извиниться",
         "понюхать", "лизнуть", "потискать", "пригласить на чай"
     ],
-    "daily_limit": 15,  # Лимит RP в день для бесплатных
-    "probability_limit": 10,  # Лимит !вероятность в день
-    "premium_commands": [  # Только для премиум
+    "daily_limit": 15,
+    "probability_limit": 10,
+    "premium_commands": [
         "отсосать", "самоотсос", "выебать", "трахнуть",
         "изнасиловать", "обкончать", "разорвать очко",
         "довести до сквирта", "оторвать член", "кастрировать",
@@ -53,11 +75,9 @@ PREMIUM_CONFIG = {
 # ==================== БАЗА ДАННЫХ ====================
 
 def init_db():
-    """Инициализация всех таблиц SQLite"""
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
     
-    # Пользователи
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             hashed_username TEXT PRIMARY KEY,
@@ -65,7 +85,6 @@ def init_db():
         )
     ''')
     
-    # Профили
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_profiles (
             user_id INTEGER PRIMARY KEY,
@@ -74,7 +93,6 @@ def init_db():
         )
     ''')
     
-    # Предупреждения
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS warns (
             user_id TEXT PRIMARY KEY,
@@ -83,7 +101,6 @@ def init_db():
         )
     ''')
     
-    # Статистика сообщений
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_data (
             chat_id TEXT,
@@ -96,7 +113,6 @@ def init_db():
         )
     ''')
     
-    # Чаты
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS chats (
             chat_id TEXT PRIMARY KEY,
@@ -104,7 +120,6 @@ def init_db():
         )
     ''')
     
-    # Низкие админы
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS low_admins (
             chat_id TEXT,
@@ -113,7 +128,6 @@ def init_db():
         )
     ''')
     
-    # RP-запросы (для инлайн)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS rp_requests (
             request_id TEXT PRIMARY KEY,
@@ -127,7 +141,6 @@ def init_db():
         )
     ''')
     
-    # Браки
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS marriages (
             chat_id TEXT,
@@ -138,7 +151,6 @@ def init_db():
         )
     ''')
     
-    # Запросы на брак
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS marriage_requests (
             request_id TEXT PRIMARY KEY,
@@ -150,7 +162,6 @@ def init_db():
         )
     ''')
     
-    # ПОДПИСКИ (ПРЕМИУМ)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS subscriptions (
             user_id INTEGER PRIMARY KEY,
@@ -162,7 +173,6 @@ def init_db():
         )
     ''')
     
-    # Статистика использования RP
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS rp_usage (
             user_id INTEGER,
@@ -172,7 +182,6 @@ def init_db():
         )
     ''')
     
-    # История вероятностей
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS probability_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -188,15 +197,12 @@ def init_db():
     conn.close()
     print('✅ База данных инициализирована')
 
-# Запускаем инициализацию
 init_db()
 
-# ==================== РАБОТА С БАЗОЙ ====================
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def sha(text):
-    """Хеширование для юзернеймов"""
-    text = str(text)
-    return xxh32(text).hexdigest()
+    return xxh32(str(text)).hexdigest()
 
 def read_users():
     conn = sqlite3.connect('bot_data.db')
@@ -260,27 +266,20 @@ def remove_description(user_id):
     conn.close()
 
 def get_user_subscription(user_id):
-    """Получить информацию о подписке пользователя"""
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT type, expires_at FROM subscriptions WHERE user_id = ?
-    ''', (user_id,))
+    cursor.execute('SELECT type, expires_at FROM subscriptions WHERE user_id = ?', (user_id,))
     result = cursor.fetchone()
     conn.close()
-    
     if not result:
         return {'type': 'free', 'expires': None}
-    
     expires = datetime.fromisoformat(result[1]) if result[1] else None
     return {'type': result[0], 'expires': expires}
 
 def set_user_subscription(user_id, sub_type, days, stars_paid):
-    """Установить подписку пользователю"""
     expires = datetime.now() + timedelta(days=days)
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
-    
     cursor.execute('''
         INSERT INTO subscriptions (user_id, type, expires_at, stars_paid, created_at, last_renewal)
         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -290,24 +289,19 @@ def set_user_subscription(user_id, sub_type, days, stars_paid):
             stars_paid = stars_paid + ?,
             last_renewal = CURRENT_TIMESTAMP
     ''', (user_id, sub_type, expires.isoformat(), stars_paid, sub_type, expires.isoformat(), stars_paid))
-    
     conn.commit()
     conn.close()
 
 def check_rp_limit(user_id):
-    """Проверить сколько RP использовано сегодня"""
     today = datetime.now().strftime('%Y-%m-%d')
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT count FROM rp_usage WHERE user_id = ? AND date = ?
-    ''', (user_id, today))
+    cursor.execute('SELECT count FROM rp_usage WHERE user_id = ? AND date = ?', (user_id, today))
     result = cursor.fetchone()
     conn.close()
     return result[0] if result else 0
 
 def increment_rp_usage(user_id):
-    """Увеличить счетчик RP использования"""
     today = datetime.now().strftime('%Y-%m-%d')
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
@@ -321,20 +315,15 @@ def increment_rp_usage(user_id):
     conn.close()
 
 def check_probability_limit(user_id):
-    """Проверить сколько !вероятность использовано сегодня"""
     today = datetime.now().strftime('%Y-%m-%d')
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT COUNT(*) FROM probability_history 
-        WHERE user_id = ? AND date(created_at) = ?
-    ''', (user_id, today))
+    cursor.execute('SELECT COUNT(*) FROM probability_history WHERE user_id = ? AND date(created_at) = ?', (user_id, today))
     result = cursor.fetchone()
     conn.close()
     return result[0] if result else 0
 
 def save_probability_question(user_id, username, question, result):
-    """Сохранить вопрос вероятности в историю"""
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -345,14 +334,11 @@ def save_probability_question(user_id, username, question, result):
     conn.close()
 
 def get_probability_history(user_id, limit=5):
-    """Получить историю вероятностей пользователя"""
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
     cursor.execute('''
         SELECT question, result, created_at FROM probability_history 
-        WHERE user_id = ? 
-        ORDER BY created_at DESC 
-        LIMIT ?
+        WHERE user_id = ? ORDER BY created_at DESC LIMIT ?
     ''', (user_id, limit))
     results = cursor.fetchall()
     conn.close()
@@ -373,33 +359,6 @@ def save_warns(warns):
     for user_id, info in warns.items():
         cursor.execute('INSERT INTO warns (user_id, warn_count, last_warn_time) VALUES (?, ?, ?)',
                        (user_id, info['warn_count'], info['last_warn_time']))
-    conn.commit()
-    conn.close()
-
-def read_user_data():
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT chat_id, user_id, date, message_count, last_activity FROM user_data')
-    data = {}
-    for chat_id, user_id, date, message_count, last_activity in cursor.fetchall():
-        if chat_id not in data:
-            data[chat_id] = {}
-        if user_id not in data[chat_id]:
-            data[chat_id][user_id] = {'stats': {}, 'last_activity': last_activity}
-        data[chat_id][user_id]['stats'][date] = message_count
-    conn.close()
-    return data
-
-def save_user_data(data):
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM user_data')
-    for chat_id, users in data.items():
-        for user_id, info in users.items():
-            last_activity = info.get('last_activity', '')
-            for date, count in info['stats'].items():
-                cursor.execute('INSERT INTO user_data (chat_id, user_id, date, message_count, last_activity) VALUES (?, ?, ?, ?, ?)',
-                               (chat_id, user_id, date, count, last_activity))
     conn.commit()
     conn.close()
 
@@ -469,10 +428,7 @@ def delete_marriage_request(request_id):
 def is_married(chat_id, user_id):
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT 1 FROM marriages 
-        WHERE chat_id = ? AND (spouse1_id = ? OR spouse2_id = ?)
-    ''', (str(chat_id), user_id, user_id))
+    cursor.execute('SELECT 1 FROM marriages WHERE chat_id = ? AND (spouse1_id = ? OR spouse2_id = ?)', (str(chat_id), user_id, user_id))
     result = cursor.fetchone()
     conn.close()
     return bool(result)
@@ -480,10 +436,7 @@ def is_married(chat_id, user_id):
 def get_spouse(chat_id, user_id):
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT spouse1_id, spouse2_id FROM marriages 
-        WHERE chat_id = ? AND (spouse1_id = ? OR spouse2_id = ?)
-    ''', (str(chat_id), user_id, user_id))
+    cursor.execute('SELECT spouse1_id, spouse2_id FROM marriages WHERE chat_id = ? AND (spouse1_id = ? OR spouse2_id = ?)', (str(chat_id), user_id, user_id))
     result = cursor.fetchone()
     conn.close()
     if result:
@@ -532,23 +485,21 @@ def get_user_daily_stats(chat_id, user_id):
     return result[0] if result else 0
 
 def get_user_weekly_stats(chat_id, user_id):
-    week_ago = datetime.now() - timedelta(days=7)
-    week_ago_str = week_ago.strftime('%Y-%m-%d')
+    week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
     cursor.execute('SELECT SUM(message_count) FROM user_data WHERE chat_id = ? AND user_id = ? AND date >= ?',
-                   (str(chat_id), str(user_id), week_ago_str))
+                   (str(chat_id), str(user_id), week_ago))
     result = cursor.fetchone()
     conn.close()
     return result[0] if result and result[0] else 0
 
 def get_user_monthly_stats(chat_id, user_id):
-    month_ago = datetime.now() - timedelta(days=30)
-    month_ago_str = month_ago.strftime('%Y-%m-%d')
+    month_ago = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
     cursor.execute('SELECT SUM(message_count) FROM user_data WHERE chat_id = ? AND user_id = ? AND date >= ?',
-                   (str(chat_id), str(user_id), month_ago_str))
+                   (str(chat_id), str(user_id), month_ago))
     result = cursor.fetchone()
     conn.close()
     return result[0] if result and result[0] else 0
@@ -568,40 +519,38 @@ def get_daily_stats(chat_id):
     cursor = conn.cursor()
     cursor.execute('SELECT user_id, message_count FROM user_data WHERE chat_id = ? AND date = ?',
                    (str(chat_id), today))
-    daily_stats = {row[0]: row[1] for row in cursor.fetchall()}
+    stats = {row[0]: row[1] for row in cursor.fetchall()}
     conn.close()
-    return daily_stats
+    return stats
 
 def get_weekly_stats(chat_id):
-    week_ago = datetime.now() - timedelta(days=7)
-    week_ago_str = week_ago.strftime('%Y-%m-%d')
+    week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
     cursor.execute('SELECT user_id, SUM(message_count) FROM user_data WHERE chat_id = ? AND date >= ? GROUP BY user_id',
-                   (str(chat_id), week_ago_str))
-    weekly_stats = {row[0]: row[1] for row in cursor.fetchall()}
+                   (str(chat_id), week_ago))
+    stats = {row[0]: row[1] for row in cursor.fetchall()}
     conn.close()
-    return weekly_stats
+    return stats
 
 def get_monthly_stats(chat_id):
-    month_ago = datetime.now() - timedelta(days=30)
-    month_ago_str = month_ago.strftime('%Y-%m-%d')
+    month_ago = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
     cursor.execute('SELECT user_id, SUM(message_count) FROM user_data WHERE chat_id = ? AND date >= ? GROUP BY user_id',
-                   (str(chat_id), month_ago_str))
-    monthly_stats = {row[0]: row[1] for row in cursor.fetchall()}
+                   (str(chat_id), month_ago))
+    stats = {row[0]: row[1] for row in cursor.fetchall()}
     conn.close()
-    return monthly_stats
+    return stats
 
 def get_all_time_stats(chat_id):
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
     cursor.execute('SELECT user_id, SUM(message_count) FROM user_data WHERE chat_id = ? GROUP BY user_id',
                    (str(chat_id),))
-    all_time_stats = {row[0]: row[1] for row in cursor.fetchall()}
+    stats = {row[0]: row[1] for row in cursor.fetchall()}
     conn.close()
-    return all_time_stats
+    return stats
 
 def add_chat_to_db(chat_id, chat_title):
     conn = sqlite3.connect('bot_data.db')
@@ -621,24 +570,18 @@ def get_all_chats():
 def save_last_target(chat_id, user_id, target_id):
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
-    cursor.execute('''
-        INSERT OR IGNORE INTO user_data (chat_id, user_id, date, message_count, last_activity)
-        VALUES (?, ?, ?, 0, ?)
-    ''', (str(chat_id), str(user_id), datetime.now().strftime('%Y-%m-%d'), None))
-    cursor.execute('''
-        UPDATE user_data SET last_mentioned_target = ? 
-        WHERE chat_id = ? AND user_id = ? AND date = ?
-    ''', (str(target_id), str(chat_id), str(user_id), datetime.now().strftime('%Y-%m-%d')))
+    cursor.execute('INSERT OR IGNORE INTO user_data (chat_id, user_id, date, message_count, last_activity) VALUES (?, ?, ?, 0, ?)',
+                   (str(chat_id), str(user_id), datetime.now().strftime('%Y-%m-%d'), None))
+    cursor.execute('UPDATE user_data SET last_mentioned_target = ? WHERE chat_id = ? AND user_id = ? AND date = ?',
+                   (str(target_id), str(chat_id), str(user_id), datetime.now().strftime('%Y-%m-%d')))
     conn.commit()
     conn.close()
 
 def get_last_target(chat_id, user_id):
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT last_mentioned_target FROM user_data 
-        WHERE chat_id = ? AND user_id = ? AND date = ? LIMIT 1
-    ''', (str(chat_id), str(user_id), datetime.now().strftime('%Y-%m-%d')))
+    cursor.execute('SELECT last_mentioned_target FROM user_data WHERE chat_id = ? AND user_id = ? AND date = ? LIMIT 1',
+                   (str(chat_id), str(user_id), datetime.now().strftime('%Y-%m-%d')))
     result = cursor.fetchone()
     conn.close()
     return result[0] if result and result[0] else None
@@ -707,37 +650,15 @@ def remove_warn(user_id):
 
 # ==================== НАСТРОЙКИ БОТА ====================
 
-# Загружаем конфиг
-def read_db():
-    with open('db.json', 'r') as openfile:
-        return json.load(openfile)
-
-def write_db(db):
-    with open('db.json', 'w') as outfile:
-        json.dump(db, outfile, indent=2)
-
-# Проверяем наличие db.json
-if not os.path.exists('db.json'):
-    db = {'token': 'None', 'admin_id_for_errors': None, 'owner_id': None, 'beta_testers': []}
-    write_db(db)
-    print('❌ Создан файл db.json. Вставь токен бота!')
-    exit()
-
-db_config = read_db()
-BOT_TOKEN = db_config['token']
-OWNER_ID = db_config['owner_id']
-ADMIN_ID = db_config['admin_id_for_errors']
-BETA_TESTERS = db_config.get('beta_testers', [])
+# Логирование
+logging.basicConfig(level=logging.INFO)
+log_stream = io.StringIO()
+logging.basicConfig(stream=log_stream, level=logging.ERROR)
 
 # Известные ошибки
 known_errs = {
     'A request to the Telegram API was unsuccessful. Error code: 400. Description: Bad Request: not enough rights to restrict/unrestrict chat member': 'Увы, но у бота не хватает прав для этого.'
 }
-
-# Логирование
-logging.basicConfig(level=logging.INFO)
-log_stream = io.StringIO()
-logging.basicConfig(stream=log_stream, level=logging.ERROR)
 
 def catch_error(message, e, err_type=None):
     if not err_type:
@@ -993,11 +914,10 @@ def whoami_command(message):
     conn.close()
     
     owner_text = " 👑 Владелец" if user_id == OWNER_ID else ""
-    beta_text = " 💠 Бета-тестер" if user_id in BETA_TESTERS else ""
+    beta_text = ""  # Можно добавить бета-тестеров позже
     desc_text = f"\n📝 {get_description(user_id)}" if get_description(user_id) else ""
     marriage_text = get_profile_addition(chat_id, user_id)
     
-    # Проверка подписки
     sub = get_user_subscription(user_id)
     premium_text = " 💎 Премиум" if sub['type'] != 'free' and sub['expires'] and sub['expires'] > datetime.now() else ""
     
@@ -1047,15 +967,13 @@ def whois_command(message):
         conn.close()
         
         owner_text = " 👑 Владелец" if target_id == OWNER_ID else ""
-        beta_text = " 💠 Бета-тестер" if target_id in BETA_TESTERS else ""
         desc_text = f"\n📝 {get_description(target_id)}" if get_description(target_id) else ""
         marriage_text = get_profile_addition(chat_id, target_id)
         
-        # Проверка подписки
         sub = get_user_subscription(target_id)
         premium_text = " 💎 Премиум" if sub['type'] != 'free' and sub['expires'] and sub['expires'] > datetime.now() else ""
         
-        text = (f"Это {username}{owner_text}{beta_text}{premium_text}{desc_text}{marriage_text}\n\n"
+        text = (f"Это {username}{owner_text}{premium_text}{desc_text}{marriage_text}\n\n"
                 f"Последний актив: {last_active}\n"
                 f"Стата (д|н|м|вся): {daily}|{weekly}|{monthly}|{all_time}")
         
@@ -1106,7 +1024,6 @@ def premium_command(message):
         )
         markup.add(btn)
     
-    # Информация о бесплатном тарифе
     free_info = (
         f"🎁 Бесплатный тариф:\n"
         f"• {len(PREMIUM_CONFIG['free_commands'])} базовых RP-команд\n"
@@ -1211,11 +1128,9 @@ def probability_command(message):
         
         user_id = message.from_user.id
         
-        # Проверка подписки
         sub = get_user_subscription(user_id)
         is_premium = sub['type'] != 'free' and sub['expires'] and sub['expires'] > datetime.now()
         
-        # Лимиты для бесплатных
         if not is_premium:
             used_today = check_probability_limit(user_id)
             if used_today >= PREMIUM_CONFIG['probability_limit']:
@@ -1226,14 +1141,11 @@ def probability_command(message):
                 )
                 return
         
-        # Генерация вероятности
         probability = random.randint(0, 100)
         
-        # Сохраняем в историю
         username = message.from_user.username or f"id{user_id}"
         save_probability_question(user_id, username, text, probability)
         
-        # Выбор эмодзи
         if probability < 10:
             emoji = "😱"
             comment = "Абсолютно невероятно!"
@@ -1289,7 +1201,6 @@ def handle_rp_commands(message):
     
     analytic(message)
     
-    # Обновляем статистику сообщений
     chat_id = str(message.chat.id)
     user_id = str(message.from_user.id)
     date = datetime.now().strftime('%Y-%m-%d')
@@ -1309,7 +1220,6 @@ def handle_rp_commands(message):
     conn.commit()
     conn.close()
     
-    # Проверяем RP-команды
     text = message.text.lower().strip()
     command = None
     for cmd in RP_COMMANDS.keys():
@@ -1322,11 +1232,9 @@ def handle_rp_commands(message):
     
     user_id_num = message.from_user.id
     
-    # Проверка подписки
     sub = get_user_subscription(user_id_num)
     is_premium = sub['type'] != 'free' and sub['expires'] and sub['expires'] > datetime.now()
     
-    # Проверка доступа к команде
     if command in PREMIUM_CONFIG['premium_commands'] and not is_premium:
         bot.reply_to(
             message,
@@ -1334,7 +1242,6 @@ def handle_rp_commands(message):
         )
         return
     
-    # Лимиты для бесплатных
     if not is_premium:
         used_today = check_rp_limit(user_id_num)
         if used_today >= PREMIUM_CONFIG['daily_limit']:
@@ -1346,7 +1253,6 @@ def handle_rp_commands(message):
             return
         increment_rp_usage(user_id_num)
     
-    # Определяем цель
     if message.reply_to_message:
         target_id = message.reply_to_message.from_user.id
         target_name = get_name(message)
@@ -1355,10 +1261,8 @@ def handle_rp_commands(message):
     
     sender_name = get_nickname(user_id_num) or message.from_user.first_name
     
-    # Получаем данные команды
     cmd_data = RP_COMMANDS[command]
     
-    # Выбираем accept или reject (30% reject)
     if random.random() < 0.3:
         response = cmd_data['reject'].format(sender=sender_name, target=target_name)
     else:
@@ -1540,7 +1444,6 @@ def close_chat_command(message):
                 can_send_other_messages=False,
                 can_add_web_page_previews=False
             ))
-            # Разрешить писать владельцу
             try:
                 bot.restrict_chat_member(message.chat.id, OWNER_ID,
                     can_send_messages=True,
@@ -1818,17 +1721,14 @@ def help_command(message):
 Пинг / Кинг / Бот - Проверка
 Какая нагрузка - Статус сервера</blockquote>\n"""
         
-        # RP команды
         help_text_rp = "<blockquote expandable><b>💕 RP-команды</b>\n"
         
         if is_premium:
-            # Все команды для премиум
-            for cmd in sorted(RP_COMMANDS.keys())[:30]:  # Покажем первые 30, чтобы не спамить
+            for cmd in sorted(RP_COMMANDS.keys())[:30]:
                 desc = RP_COMMANDS[cmd].get('description', cmd)
                 help_text_rp += f"• <code>{cmd}</code>: {desc}\n"
             help_text_rp += f"\n✨ Всего команд: {len(RP_COMMANDS)}"
         else:
-            # Только бесплатные
             for cmd in sorted(PREMIUM_CONFIG['free_commands']):
                 desc = RP_COMMANDS[cmd].get('description', cmd)
                 help_text_rp += f"• <code>{cmd}</code>: {desc}\n"
@@ -1913,7 +1813,6 @@ def handle_rp_callback(call):
             bot.answer_callback_query(call.id, "❌ Только адресат может ответить")
             return
         
-        # Получаем имена
         sender_display = get_nickname(sender_id) or sender_name
         target_display = get_nickname(call.from_user.id) or call.from_user.first_name
         target_link = f'<a href="tg://user?id={call.from_user.id}">{target_display}</a>'
