@@ -24,3 +24,13 @@ class Config:
     MONEY_PER_MESSAGE = 1
     PREMIUM_PRICE = 5000
     PREMIUM_DAYS = 30
+    
+    @classmethod
+    def validate(cls):
+        """Проверяет обязательные переменные окружения"""
+        if not cls.BOT_TOKEN:
+            raise ValueError("BOT_TOKEN не установлен!")
+        if not cls.DATABASE_URL:
+            raise ValueError("DATABASE_URL не установлен!")
+        if not cls.OWNER_ID:
+            raise ValueError("OWNER_ID не установлен!")
