@@ -8,2233 +8,739 @@ import random
 import sqlite3
 import uuid 
 import time
-import threading
 from datetime import datetime, timedelta
-from telebot import types, util
+from telebot import types
 import logging
-import traceback
 from difflib import get_close_matches
+from xxhash import xxh32
 
 ########## НАСТРОЙКА ЛОГОВ ##########
+logging.basicConfig(level=logging.INFO)
 log_stream = io.StringIO()
-logging.basicConfig(stream=log_stream, level=logging.ERROR)
 
-########## ПРОВЕРКА ФАЙЛА КОНФИГУРАЦИИ ##########
+########## ПРОВЕРКА КОНФИГА ##########
 if not os.path.exists('db.json'):
     db = {'token': 'None', 'admin_id_for_errors': None, 'owner_id': None, 'beta_testers': []}
-    js = json.dumps(db, indent=2)
-    with open('db.json', 'w') as outfile:
-        outfile.write(js)
-    print('ВНИМАНИЕ: Файл db.json создан. Введи токен в "None", свой ID в "admin_id_for_errors" и "owner_id"')
+    with open('db.json', 'w') as f:
+        json.dump(db, f, indent=2)
+    print('❌ Создан db.json. Вставь токен!')
     exit()
+
+with open('db.json', 'r') as f:
+    db_config = json.load(f)
+    BOT_TOKEN = db_config['token']
+    OWNER_ID = db_config['owner_id']
 
 ########## ЗАГРУЗКА RP КОМАНД ##########
 try:
     with open('rp_commands.json', 'r', encoding='utf-8') as f:
         rp_data = json.load(f)['commands']
-    print(f"✅ Загружено {len(rp_data)} RP-команд")
+    print(f"✅ Загружено RP команд: {len(rp_data)}")
 except Exception as e:
-    print(f"❌ Ошибка загрузки RP-команд: {e}")
+    print(f"❌ Ошибка загрузки RP: {e}")
     rp_data = {}
 
-########## ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ##########
-def init_sqlite_db():
+########## БАЗА ДАННЫХ ##########
+def init_db():
     conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''CREATE TABLE IF NOT EXISTS users (hashed_username TEXT PRIMARY KEY, user_id INTEGER)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS low_admins (chat_id TEXT, username TEXT, PRIMARY KEY (chat_id, username))''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS warns (user_id INTEGER PRIMARY KEY, warn_count INTEGER DEFAULT 0, last_warn_time TEXT)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS user_data (chat_id TEXT, user_id TEXT, date TEXT, message_count INTEGER DEFAULT 0, last_activity TEXT, last_mentioned_target TEXT, PRIMARY KEY (chat_id, user_id, date))''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS chats (chat_id TEXT PRIMARY KEY, chat_title TEXT, welcome_message TEXT, rules TEXT, anti_swear INTEGER DEFAULT 0, anti_flood INTEGER DEFAULT 0, captcha_enabled INTEGER DEFAULT 0, auto_moderation INTEGER DEFAULT 1, mute_time INTEGER DEFAULT 60, message_count INTEGER DEFAULT 0)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS user_profiles (user_id INTEGER PRIMARY KEY, nickname TEXT, description TEXT, subscription_type TEXT DEFAULT 'free', subscription_expires TIMESTAMP)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS rp_requests (request_id TEXT PRIMARY KEY, chat_id TEXT, sender_id INTEGER, sender_first_name TEXT, target_id INTEGER, command TEXT, phrase TEXT, created_at TEXT)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS marriages (chat_id TEXT, spouse1_id INTEGER, spouse2_id INTEGER, created_at TEXT, PRIMARY KEY (chat_id, spouse1_id, spouse2_id))''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS marriage_requests (request_id TEXT PRIMARY KEY, chat_id TEXT, proposer_id INTEGER, proposer_first_name TEXT, target_id INTEGER, created_at TEXT)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS subscriptions (user_id INTEGER PRIMARY KEY, type TEXT DEFAULT 'free', expires_at TIMESTAMP, stars_paid INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS rp_usage (user_id INTEGER, date DATE, count INTEGER DEFAULT 0, PRIMARY KEY (user_id, date))''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS chat_settings (chat_id INTEGER PRIMARY KEY, welcome_message TEXT, rules TEXT, anti_swear INTEGER DEFAULT 0, anti_flood INTEGER DEFAULT 0, captcha_enabled INTEGER DEFAULT 0, auto_moderation INTEGER DEFAULT 1, mute_time INTEGER DEFAULT 60)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS captcha (user_id INTEGER, chat_id INTEGER, code TEXT, attempts INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (user_id, chat_id))''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS scheduled_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, message TEXT, delay INTEGER DEFAULT 1, status TEXT DEFAULT 'pending', created_by INTEGER, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS word_game (chat_id INTEGER PRIMARY KEY, last_word TEXT, last_player INTEGER, last_time TIMESTAMP)''')
-    
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users (hashed TEXT PRIMARY KEY, user_id INTEGER)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS warns (user_id INTEGER PRIMARY KEY, count INTEGER DEFAULT 0, time TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS stats (chat_id TEXT, user_id TEXT, date TEXT, msgs INTEGER DEFAULT 0, last TEXT, PRIMARY KEY (chat_id, user_id, date))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS chats (chat_id TEXT PRIMARY KEY, title TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS profiles (user_id INTEGER PRIMARY KEY, nick TEXT, bio TEXT, sub TEXT DEFAULT 'free', sub_end TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS rp_usage (user_id INTEGER, date DATE, count INTEGER DEFAULT 0, PRIMARY KEY (user_id, date))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS marriages (chat_id TEXT, u1 INTEGER, u2 INTEGER, time TEXT, PRIMARY KEY (chat_id, u1, u2))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS marry_req (id TEXT PRIMARY KEY, chat_id TEXT, from_id INTEGER, from_name TEXT, to_id INTEGER, time TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS chat_settings (chat_id INTEGER PRIMARY KEY, welcome TEXT, rules TEXT, antiswear INTEGER DEFAULT 0, antiflood INTEGER DEFAULT 0, captcha INTEGER DEFAULT 0)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS captcha (user_id INTEGER, chat_id INTEGER, code TEXT, attempts INTEGER DEFAULT 0, PRIMARY KEY (user_id, chat_id))''')
     conn.commit()
     conn.close()
-    print("✅ База данных инициализирована")
+    print("✅ База данных готова")
 
-init_sqlite_db()
+init_db()
 
-########## РАБОТА С БАЗОЙ ДАННЫХ ##########
-def read_db():
-    with open('db.json', 'r') as openfile:
-        return json.load(openfile)
+########## ФУНКЦИИ БД ##########
+def sha(text): return xxh32(str(text).lower()).hexdigest()
 
-def write_db(db):
-    js = json.dumps(db, indent=2)
-    with open('db.json', 'w') as outfile:
-        outfile.write(js)
+def save_user(username, user_id):
+    if username:
+        conn = sqlite3.connect('bot_data.db')
+        c = conn.cursor()
+        c.execute('INSERT OR REPLACE INTO users VALUES (?, ?)', (sha(username), user_id))
+        conn.commit()
+        conn.close()
 
-def read_users():
+def get_user_id(username):
     conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT hashed_username, user_id FROM users')
-    users = {row[0]: row[1] for row in cursor.fetchall()}
+    c = conn.cursor()
+    c.execute('SELECT user_id FROM users WHERE hashed = ?', (sha(username),))
+    r = c.fetchone()
     conn.close()
-    return users
+    return r[0] if r else None
 
-def write_users(hashed_username, user_id):
+def get_nick(user_id):
     conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('INSERT OR REPLACE INTO users (hashed_username, user_id) VALUES (?, ?)', (hashed_username, user_id))
-    conn.commit()
+    c = conn.cursor()
+    c.execute('SELECT nick FROM profiles WHERE user_id = ?', (user_id,))
+    r = c.fetchone()
     conn.close()
+    return r[0] if r else None
 
-def add_chat_to_db(chat_id, chat_title):
+def set_nick(user_id, nick):
     conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('INSERT OR REPLACE INTO chats (chat_id, chat_title) VALUES (?, ?)', (str(chat_id), chat_title))
+    c = conn.cursor()
+    c.execute('INSERT OR IGNORE INTO profiles (user_id) VALUES (?)', (user_id,))
+    c.execute('UPDATE profiles SET nick = ? WHERE user_id = ?', (nick, user_id))
     conn.commit()
     conn.close()
 
-def get_all_chats():
+def get_bio(user_id):
     conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT chat_id FROM chats')
-    chats = [row[0] for row in cursor.fetchall()]
+    c = conn.cursor()
+    c.execute('SELECT bio FROM profiles WHERE user_id = ?', (user_id,))
+    r = c.fetchone()
     conn.close()
-    return chats
+    return r[0] if r else None
 
-def get_chat_settings(chat_id):
+def set_bio(user_id, bio):
     conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM chat_settings WHERE chat_id = ?', (chat_id,))
-    result = cursor.fetchone()
-    conn.close()
-    
-    if result:
-        return {
-            'welcome_message': result[1],
-            'rules': result[2],
-            'anti_swear': bool(result[3]),
-            'anti_flood': bool(result[4]),
-            'captcha_enabled': bool(result[5]),
-            'auto_moderation': bool(result[6]),
-            'mute_time': result[7]
-        }
-    return {
-        'welcome_message': None,
-        'rules': None,
-        'anti_swear': False,
-        'anti_flood': False,
-        'captcha_enabled': False,
-        'auto_moderation': True,
-        'mute_time': 60
-    }
-
-def save_chat_settings(chat_id, settings):
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT OR REPLACE INTO chat_settings 
-        (chat_id, welcome_message, rules, anti_swear, anti_flood, captcha_enabled, auto_moderation, mute_time)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (chat_id, 
-          settings.get('welcome_message'), 
-          settings.get('rules'),
-          int(settings.get('anti_swear', False)),
-          int(settings.get('anti_flood', False)),
-          int(settings.get('captcha_enabled', False)),
-          int(settings.get('auto_moderation', True)),
-          settings.get('mute_time', 60)))
+    c = conn.cursor()
+    c.execute('INSERT OR IGNORE INTO profiles (user_id) VALUES (?)', (user_id,))
+    c.execute('UPDATE profiles SET bio = ? WHERE user_id = ?', (bio, user_id))
     conn.commit()
     conn.close()
 
-def get_nickname(user_id):
+def check_sub(user_id):
     conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT nickname FROM user_profiles WHERE user_id = ?', (user_id,))
-    result = cursor.fetchone()
+    c = conn.cursor()
+    c.execute('SELECT sub, sub_end FROM profiles WHERE user_id = ?', (user_id,))
+    r = c.fetchone()
     conn.close()
-    return result[0] if result else None
+    if not r or r[0] == 'free':
+        return False
+    if r[1] and datetime.fromisoformat(r[1]) > datetime.now():
+        return True
+    return False
 
-def set_nickname(user_id, nickname):
+def set_sub(user_id, days):
+    end = (datetime.now() + timedelta(days=days)).isoformat()
     conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('INSERT OR IGNORE INTO user_profiles (user_id) VALUES (?)', (user_id,))
-    cursor.execute('UPDATE user_profiles SET nickname = ? WHERE user_id = ?', (nickname, user_id))
-    conn.commit()
-    conn.close()
-
-def get_description(user_id):
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT description FROM user_profiles WHERE user_id = ?', (user_id,))
-    result = cursor.fetchone()
-    conn.close()
-    return result[0] if result else None
-
-def set_description(user_id, description):
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('INSERT OR IGNORE INTO user_profiles (user_id) VALUES (?)', (user_id,))
-    cursor.execute('UPDATE user_profiles SET description = ? WHERE user_id = ?', (description, user_id))
-    conn.commit()
-    conn.close()
-
-def get_user_subscription(user_id):
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT type, expires_at FROM subscriptions WHERE user_id = ?', (user_id,))
-    result = cursor.fetchone()
-    conn.close()
-    
-    if not result:
-        return {'type': 'free', 'expires': None}
-    
-    return {
-        'type': result[0],
-        'expires': datetime.fromisoformat(result[1]) if result[1] else None
-    }
-
-def set_user_subscription(user_id, sub_type, days, stars_paid):
-    expires = datetime.now() + timedelta(days=days)
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO subscriptions (user_id, type, expires_at, stars_paid)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-            type = ?,
-            expires_at = ?,
-            stars_paid = stars_paid + ?
-    ''', (user_id, sub_type, expires.isoformat(), stars_paid, sub_type, expires.isoformat(), stars_paid))
+    c = conn.cursor()
+    c.execute('INSERT OR IGNORE INTO profiles (user_id) VALUES (?)', (user_id,))
+    c.execute('UPDATE profiles SET sub = ?, sub_end = ? WHERE user_id = ?', ('premium', end, user_id))
     conn.commit()
     conn.close()
 
 def check_rp_limit(user_id):
     today = datetime.now().strftime('%Y-%m-%d')
     conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT count FROM rp_usage WHERE user_id = ? AND date = ?', (user_id, today))
-    result = cursor.fetchone()
+    c = conn.cursor()
+    c.execute('SELECT count FROM rp_usage WHERE user_id = ? AND date = ?', (user_id, today))
+    r = c.fetchone()
     conn.close()
-    return result[0] if result else 0
+    return r[0] if r else 0
 
-def increment_rp_usage(user_id):
+def add_rp_usage(user_id):
     today = datetime.now().strftime('%Y-%m-%d')
     conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO rp_usage (user_id, date, count) VALUES (?, ?, 1)
-        ON CONFLICT(user_id, date) DO UPDATE SET count = count + 1
-    ''', (user_id, today))
+    c = conn.cursor()
+    c.execute('INSERT INTO rp_usage (user_id, date, count) VALUES (?, ?, 1) ON CONFLICT(user_id, date) DO UPDATE SET count = count + 1', (user_id, today))
     conn.commit()
     conn.close()
 
-def save_rp_request(request_id, chat_id, sender_id, sender_first_name, target_id, command, phrase):
+def add_marry_req(req_id, chat_id, from_id, from_name, to_id):
     conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    cursor.execute('''
-        INSERT INTO rp_requests (request_id, chat_id, sender_id, sender_first_name, target_id, command, phrase, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (request_id, str(chat_id), sender_id, sender_first_name, target_id, command, phrase, created_at))
+    c = conn.cursor()
+    c.execute('INSERT INTO marry_req VALUES (?, ?, ?, ?, ?, ?)', (req_id, str(chat_id), from_id, from_name, to_id, datetime.now().isoformat()))
     conn.commit()
     conn.close()
 
-def get_rp_request(request_id):
+def get_marry_req(req_id):
     conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT chat_id, sender_id, sender_first_name, target_id, command, phrase FROM rp_requests WHERE request_id = ?', (request_id,))
-    result = cursor.fetchone()
+    c = conn.cursor()
+    c.execute('SELECT chat_id, from_id, from_name, to_id FROM marry_req WHERE id = ?', (req_id,))
+    r = c.fetchone()
     conn.close()
-    return result
+    return r
 
-def save_marriage_request(request_id, chat_id, proposer_id, proposer_first_name, target_id):
+def del_marry_req(req_id):
     conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    cursor.execute('''
-        INSERT INTO marriage_requests (request_id, chat_id, proposer_id, proposer_first_name, target_id, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (request_id, str(chat_id), proposer_id, proposer_first_name, target_id, created_at))
-    conn.commit()
-    conn.close()
-
-def get_marriage_request(request_id):
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT chat_id, proposer_id, proposer_first_name, target_id FROM marriage_requests WHERE request_id = ?', (request_id,))
-    result = cursor.fetchone()
-    conn.close()
-    return result
-
-def delete_marriage_request(request_id):
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM marriage_requests WHERE request_id = ?', (request_id,))
+    c = conn.cursor()
+    c.execute('DELETE FROM marry_req WHERE id = ?', (req_id,))
     conn.commit()
     conn.close()
 
 def is_married(chat_id, user_id):
     conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT 1 FROM marriages WHERE chat_id = ? AND (spouse1_id = ? OR spouse2_id = ?)', 
-                  (str(chat_id), user_id, user_id))
-    result = cursor.fetchone()
+    c = conn.cursor()
+    c.execute('SELECT 1 FROM marriages WHERE chat_id = ? AND (u1 = ? OR u2 = ?)', (str(chat_id), user_id, user_id))
+    r = c.fetchone()
     conn.close()
-    return bool(result)
+    return bool(r)
 
-def get_spouse(chat_id, user_id):
+def add_marriage(chat_id, u1, u2):
+    a, b = sorted([u1, u2])
     conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT spouse1_id, spouse2_id FROM marriages WHERE chat_id = ? AND (spouse1_id = ? OR spouse2_id = ?)',
-                  (str(chat_id), user_id, user_id))
-    result = cursor.fetchone()
-    conn.close()
-    if result:
-        return result[1] if result[0] == user_id else result[0]
-    return None
-
-def register_marriage(chat_id, user1_id, user2_id):
-    min_id, max_id = sorted([user1_id, user2_id])
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    cursor.execute('INSERT OR IGNORE INTO marriages (chat_id, spouse1_id, spouse2_id, created_at) VALUES (?, ?, ?, ?)',
-                  (str(chat_id), min_id, max_id, created_at))
+    c = conn.cursor()
+    c.execute('INSERT OR IGNORE INTO marriages VALUES (?, ?, ?, ?)', (str(chat_id), a, b, datetime.now().isoformat()))
     conn.commit()
     conn.close()
 
-def dissolve_marriage(chat_id, user_id):
-    spouse_id = get_spouse(chat_id, user_id)
-    if spouse_id:
-        min_id, max_id = sorted([user_id, spouse_id])
-        conn = sqlite3.connect('bot_data.db')
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM marriages WHERE chat_id = ? AND spouse1_id = ? AND spouse2_id = ?',
-                      (str(chat_id), min_id, max_id))
+def del_marriage(chat_id, user_id):
+    conn = sqlite3.connect('bot_data.db')
+    c = conn.cursor()
+    c.execute('SELECT u1, u2 FROM marriages WHERE chat_id = ? AND (u1 = ? OR u2 = ?)', (str(chat_id), user_id, user_id))
+    r = c.fetchone()
+    if r:
+        a, b = sorted([r[0], r[1]])
+        c.execute('DELETE FROM marriages WHERE chat_id = ? AND u1 = ? AND u2 = ?', (str(chat_id), a, b))
         conn.commit()
         conn.close()
-        return spouse_id
+        return r[1] if r[0] == user_id else r[0]
+    conn.close()
     return None
 
-def get_all_marriages(chat_id):
+def get_settings(chat_id):
     conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT spouse1_id, spouse2_id, created_at FROM marriages WHERE chat_id = ?', (str(chat_id),))
-    results = cursor.fetchall()
+    c = conn.cursor()
+    c.execute('SELECT welcome, rules, antiswear, antiflood, captcha FROM chat_settings WHERE chat_id = ?', (chat_id,))
+    r = c.fetchone()
     conn.close()
-    return results
+    if r:
+        return {'welcome': r[0], 'rules': r[1], 'antiswear': bool(r[2]), 'antiflood': bool(r[3]), 'captcha': bool(r[4])}
+    return {'welcome': None, 'rules': None, 'antiswear': False, 'antiflood': False, 'captcha': False}
 
-def create_captcha(user_id, chat_id):
-    import random
-    import string
-    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+def save_settings(chat_id, **kwargs):
     conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT OR REPLACE INTO captcha (user_id, chat_id, code, attempts) VALUES (?, ?, ?, 0)
-    ''', (user_id, chat_id, code))
+    c = conn.cursor()
+    s = get_settings(chat_id)
+    s.update(kwargs)
+    c.execute('INSERT OR REPLACE INTO chat_settings VALUES (?, ?, ?, ?, ?, ?)', 
+              (chat_id, s['welcome'], s['rules'], int(s['antiswear']), int(s['antiflood']), int(s['captcha'])))
     conn.commit()
     conn.close()
-    return code
+
+def add_captcha(user_id, chat_id, code):
+    conn = sqlite3.connect('bot_data.db')
+    c = conn.cursor()
+    c.execute('INSERT OR REPLACE INTO captcha VALUES (?, ?, ?, 0)', (user_id, chat_id, code))
+    conn.commit()
+    conn.close()
 
 def check_captcha(user_id, chat_id, code):
     conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT code, attempts FROM captcha WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
-    result = cursor.fetchone()
-    
-    if not result:
+    c = conn.cursor()
+    c.execute('SELECT code, attempts FROM captcha WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
+    r = c.fetchone()
+    if not r:
         conn.close()
         return False
-    
-    saved_code, attempts = result
-    
-    if code.upper() == saved_code:
-        cursor.execute('DELETE FROM captcha WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
+    if r[0].upper() == code.upper():
+        c.execute('DELETE FROM captcha WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
         conn.commit()
         conn.close()
         return True
-    
-    if attempts >= 2:
-        cursor.execute('DELETE FROM captcha WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
+    if r[1] >= 2:
+        c.execute('DELETE FROM captcha WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
         conn.commit()
         conn.close()
         return False
-    
-    cursor.execute('UPDATE captcha SET attempts = attempts + 1 WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
+    c.execute('UPDATE captcha SET attempts = attempts + 1 WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
     conn.commit()
     conn.close()
     return False
 
-def save_broadcast(chat_id, message, delay):
+def get_chats():
     conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO scheduled_messages (chat_id, message, delay, status) VALUES (?, ?, ?, 'pending')
-    ''', (chat_id, message, delay))
+    c = conn.cursor()
+    c.execute('SELECT chat_id FROM chats')
+    r = [x[0] for x in c.fetchall()]
+    conn.close()
+    return r
+
+def add_chat(chat_id, title):
+    conn = sqlite3.connect('bot_data.db')
+    c = conn.cursor()
+    c.execute('INSERT OR REPLACE INTO chats VALUES (?, ?)', (str(chat_id), title))
     conn.commit()
     conn.close()
 
-def get_pending_broadcasts():
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT id, chat_id, message, delay FROM scheduled_messages WHERE status = "pending"')
-    results = cursor.fetchall()
-    conn.close()
-    return results
-
-def mark_broadcast_sent(broadcast_id):
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('UPDATE scheduled_messages SET status = "sent" WHERE id = ?', (broadcast_id,))
-    conn.commit()
-    conn.close()
-
-def save_word_game(chat_id, last_word, last_player):
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT OR REPLACE INTO word_game (chat_id, last_word, last_player, last_time)
-        VALUES (?, ?, ?, ?)
-    ''', (chat_id, last_word, last_player, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
-
-def get_word_game(chat_id):
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT last_word, last_player, last_time FROM word_game WHERE chat_id = ?', (chat_id,))
-    result = cursor.fetchone()
-    conn.close()
-    return result
-
-########## ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ##########
-from xxhash import xxh32
-
-def sha(text):
-    text = str(text)
-    return xxh32(text).hexdigest()
-
-def get_uptime():
+########## ВСПОМОГАТЕЛЬНЫЕ ##########
+def get_user_link(user_id, chat_id):
     try:
-        result = subprocess.run(['uptime'], capture_output=True, text=True, check=True)
-        return result.stdout.strip()
+        m = bot.get_chat_member(chat_id, user_id)
+        name = get_nick(user_id) or m.user.first_name
+        name = name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        if m.user.username:
+            return f'<a href="https://t.me/{m.user.username.lstrip("@")}">{name}</a>'
+        return f'<a href="tg://user?id={user_id}">{name}</a>'
     except:
-        return "Не удалось получить нагрузку"
+        return f"пользователь"
 
-def get_admins(message):
-    try:
-        if message.chat.type == 'private':
-            return []
-        admins = bot.get_chat_administrators(chat_id=message.chat.id)
-        true_admins = []
-        for i in admins:
-            if i.status == 'creator' or i.can_restrict_members == True:
-                true_admins.append(i.user.id)
-        return true_admins
-    except Exception as e:
-        return []
-
-def have_rights(message):
-    db = read_db()
-    owner_id = db['owner_id']
-    if message.from_user.id == owner_id:
-        return True
-    if message.from_user.id in get_admins(message):
-        return True
-    return False
-
-def analytic(message):
-    if message.from_user and message.from_user.username:
-        hashed = sha(message.from_user.username.lower())
-        write_users(hashed, message.from_user.id)
-
-def get_user_link_sync(user_id, chat_id):
-    try:
-        member = bot.get_chat_member(chat_id, user_id)
-        display_name = get_nickname(user_id) or member.user.first_name
-        display_name = display_name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-        if member.user.username:
-            username = member.user.username.lstrip('@')
-            return f'<a href="https://t.me/{username}">{display_name}</a>'
-        else:
-            return f'<a href="tg://user?id={user_id}">{display_name}</a>'
-    except:
-        return f"Пользователь {user_id}"
-
-def get_name(message):
-    try:
-        if message.reply_to_message:
-            target_user = message.reply_to_message.from_user
-            display_name = get_nickname(target_user.id) or target_user.first_name
-            display_name = display_name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-            return f'<a href="tg://user?id={target_user.id}">{display_name}</a>'
-        return "пользователь"
-    except:
-        return "пользователь"
-
-def get_target_from_text(message):
-    """Получает target_id из текста (@username или реплай)"""
+def get_target(message):
     if message.reply_to_message:
         return message.reply_to_message.from_user.id
-    
-    text = message.text
-    words = text.split()
-    for word in words:
-        if word.startswith('@'):
-            username = word[1:].lower()
-            users = read_users()
-            hashed = sha(username)
-            if hashed in users:
-                return users[hashed]
+    for w in message.text.split():
+        if w.startswith('@'):
+            uid = get_user_id(w[1:].lower())
+            if uid:
+                return uid
     return None
 
-def parse_time(text):
-    """Парсит время из текста вида: 15 минут, 2 часа, 1 день, 30м, 2ч, 5д"""
-    text = text.lower().strip()
-    
-    patterns = [
-        (r'(\d+)\s*минут', 60),
-        (r'(\d+)\s*час', 3600),
-        (r'(\d+)\s*день', 86400),
-        (r'(\d+)\s*м', 60),
-        (r'(\d+)\s*ч', 3600),
-        (r'(\d+)\s*д', 86400)
-    ]
-    
-    for pattern, multiplier in patterns:
-        match = re.search(pattern, text)
-        if match:
-            value = int(match.group(1))
-            return value * multiplier, f"{value} {'минут' if multiplier==60 else 'часов' if multiplier==3600 else 'дней'}"
-    
-    return None, None
-
-def format_time_ago(datetime_str):
-    if not datetime_str:
-        return "Нет данных"
+def is_admin(chat_id, user_id):
     try:
-        last = datetime.strptime(datetime_str, '%Y-%m-%d %H:%M:%S')
-        now = datetime.now()
-        delta = now - last
-        if delta.total_seconds() < 60:
-            return "только что"
-        elif delta.total_seconds() < 3600:
-            minutes = int(delta.total_seconds() / 60)
-            return f"{minutes} минут назад"
-        elif delta.total_seconds() < 86400:
-            hours = int(delta.total_seconds() / 3600)
-            return f"{hours} часов назад"
-        else:
-            days = delta.days
-            return f"{days} дней назад"
+        if user_id == OWNER_ID:
+            return True
+        admins = bot.get_chat_administrators(chat_id)
+        for a in admins:
+            if a.user.id == user_id and (a.status == 'creator' or a.can_restrict_members):
+                return True
     except:
-        return "Неизвестно"
-
-def get_user_daily_stats(chat_id, user_id):
-    today = datetime.now().strftime('%Y-%m-%d')
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT message_count FROM user_data WHERE chat_id = ? AND user_id = ? AND date = ?',
-                  (str(chat_id), str(user_id), today))
-    result = cursor.fetchone()
-    conn.close()
-    return result[0] if result else 0
-
-def get_user_weekly_stats(chat_id, user_id):
-    week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT SUM(message_count) FROM user_data WHERE chat_id = ? AND user_id = ? AND date >= ?',
-                  (str(chat_id), str(user_id), week_ago))
-    result = cursor.fetchone()
-    conn.close()
-    return result[0] if result and result[0] else 0
-
-def get_user_all_time_stats(chat_id, user_id):
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT SUM(message_count) FROM user_data WHERE chat_id = ? AND user_id = ?',
-                  (str(chat_id), str(user_id)))
-    result = cursor.fetchone()
-    conn.close()
-    return result[0] if result and result[0] else 0
-
-def get_daily_stats(chat_id):
-    today = datetime.now().strftime('%Y-%m-%d')
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT user_id, message_count FROM user_data WHERE chat_id = ? AND date = ?',
-                  (str(chat_id), today))
-    stats = {row[0]: row[1] for row in cursor.fetchall()}
-    conn.close()
-    return stats
-
-def get_weekly_stats(chat_id):
-    week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT user_id, SUM(message_count) FROM user_data WHERE chat_id = ? AND date >= ? GROUP BY user_id',
-                  (str(chat_id), week_ago))
-    stats = {row[0]: row[1] for row in cursor.fetchall()}
-    conn.close()
-    return stats
-
-def get_monthly_stats(chat_id):
-    month_ago = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT user_id, SUM(message_count) FROM user_data WHERE chat_id = ? AND date >= ? GROUP BY user_id',
-                  (str(chat_id), month_ago))
-    stats = {row[0]: row[1] for row in cursor.fetchall()}
-    conn.close()
-    return stats
-
-def get_all_time_stats(chat_id):
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT user_id, SUM(message_count) FROM user_data WHERE chat_id = ? GROUP BY user_id',
-                  (str(chat_id),))
-    stats = {row[0]: row[1] for row in cursor.fetchall()}
-    conn.close()
-    return stats
-
-def increment_message_count(chat_id, user_id):
-    today = datetime.now().strftime('%Y-%m-%d')
-    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO user_data (chat_id, user_id, date, message_count, last_activity)
-        VALUES (?, ?, ?, 1, ?)
-        ON CONFLICT(chat_id, user_id, date) DO UPDATE SET
-            message_count = message_count + 1,
-            last_activity = ?
-    ''', (str(chat_id), str(user_id), today, current_time, current_time))
-    conn.commit()
-    conn.close()
-
-########## АВТОИСПРАВЛЕНИЕ КОМАНД ##########
-ALL_COMMANDS = {
-    'бан': 'бан', 'разбан': 'разбан', 'кик': 'кик', 'мут': 'мут', 'размут': 'размут',
-    'варн': 'варн', 'снять варн': 'снять варн', '-смс': '-смс', '+чат': '+чат', '-чат': '-чат',
-    'пин': 'пин', 'закреп': 'закреп', 'анпин': 'анпин', '+админ': '+админ', '-админ': '-админ',
-    'кто я': 'кто я', 'кто ты': 'кто ты', 'топ дня': 'топ дня', 'топ недели': 'топ недели',
-    'топ месяца': 'топ месяца', 'топ вся': 'топ вся',
-    'брак': 'брак', 'развод': 'развод', 'браки': 'браки', 'список браков': 'список браков',
-    '!вероятность': '!вероятность', '!вер': '!вер', 'рандом': 'рандом',
-    'пинг': 'пинг', 'кинг': 'кинг', 'бот': 'бот', 'какая нагрузка': 'какая нагрузка',
-    'премиум': 'премиум'
-}
-
-# Добавляем все RP команды
-for cmd in rp_data.keys():
-    ALL_COMMANDS[cmd] = cmd
-
-def suggest_command(user_input):
-    user_input_lower = user_input.lower().strip()
-    
-    if user_input_lower in ALL_COMMANDS:
-        return user_input_lower
-    
-    matches = get_close_matches(user_input_lower, ALL_COMMANDS.keys(), n=1, cutoff=0.6)
-    
-    return matches[0] if matches else None
-
-def is_command(text):
-    if not text:
-        return False
-    if '@Barbariska_robot' in text.lower():
-        return True
-    words = text.lower().split()
-    if words and words[0] in ALL_COMMANDS:
-        return True
+        pass
     return False
 
-########## ЖИВЫЕ ОТВЕТЫ ##########
-def get_live_response(command, sender_name, target_name):
-    responses = {
-        'обнять': [
-            f"{sender_name} 🤗 крепко-крепко обнял {target_name}!",
-            f"{sender_name} заключил {target_name} в тёплые объятия 🥰",
-            f"{sender_name} обнимает {target_name} и не отпускает!"
-        ],
-        'поцеловать': [
-            f"{sender_name} 😘 нежно поцеловал {target_name} в щёчку",
-            f"{sender_name} чмокнул {target_name} прямо в носик!",
-            f"{sender_name} подарил {target_name} сладкий поцелуй 💋"
-        ],
-        'поздравить': [
-            f"{sender_name} 🎉 от всей души поздравляет {target_name}!",
-            f"{sender_name} кричит {target_name}: С ПРАЗДНИКОМ! 🎊",
-            f"{sender_name} желает {target_name} всего самого наилучшего ✨"
-        ]
-    }
-    
-    if command in responses:
-        return random.choice(responses[command])
-    return None
+def have_rights(message):
+    return is_admin(message.chat.id, message.from_user.id)
 
-########## ЗАГРУЗКА КОНФИГА ##########
-db_config = read_db()
-BOT_TOKEN = db_config['token']
-OWNER_ID = db_config['owner_id']
-ADMIN_ID = db_config['admin_id_for_errors']
+def parse_time(text):
+    text = text.lower()
+    patterns = [(r'(\d+)\s*мин', 60), (r'(\d+)\s*час', 3600), (r'(\d+)\s*дн', 86400),
+                (r'(\d+)\s*м', 60), (r'(\d+)\s*ч', 3600), (r'(\d+)\s*д', 86400)]
+    for p, m in patterns:
+        match = re.search(p, text)
+        if match:
+            return int(match.group(1)) * m
+    return 3600
 
-print(f"✅ Бот запускается с токеном: {BOT_TOKEN[:10]}...")
-print(f"✅ Идентификатор владельца: {OWNER_ID}")
+def format_time(seconds):
+    if seconds < 60:
+        return f"{seconds} сек"
+    if seconds < 3600:
+        return f"{seconds//60} мин"
+    if seconds < 86400:
+        return f"{seconds//3600} ч"
+    return f"{seconds//86400} дн"
 
+########## БОТ ##########
 bot = telebot.TeleBot(BOT_TOKEN)
+print("✅ Бот запущен")
 
-########## ФИЛЬТРЫ ДЛЯ КНОПОК ##########
-class AdminOnlyFilter:
-    def __init__(self, message):
-        self.message = message
-    
-    def check(self, call):
-        return have_rights(self.message)
-
-########## ОБРАБОТЧИК ДОБАВЛЕНИЯ В ЧАТ ##########
-@bot.message_handler(content_types=['new_chat_members'])
-def welcome_to_chat(message):
-    bot_id = bot.get_me().id
-    
-    for user in message.new_chat_members:
-        if user.id == bot_id:
-            chat_title = message.chat.title or "чат"
-            admin_username = message.from_user.username or "администратор"
-            
-            add_chat_to_db(message.chat.id, chat_title)
-            
-            welcome_text = (
-                f"🍬 <b>BARBARIS BOT</b> 🍬\n\n"
-                f"Всем привет! Меня зовут <b>Барбариска</b>!\n\n"
-                f"Спасибо, @{admin_username}, что пригласили меня в "
-                f"<b>«{chat_title}»</b>\n\n"
-                f"🛡️ Буду следить за порядком\n"
-                f"💕 Играть в RP-игры\n"
-                f"📊 Считать статистику\n"
-                f"💍 Сватать и женить\n\n"
-                f"<b>Мои команды:</b>\n"
-                f"• .хелп - все команды\n"
-                f"• кто я - мой профиль\n"
-                f"• обнять @ник - обнимашки"
-            )
-            
-            markup = types.InlineKeyboardMarkup(row_width=2)
-            markup.add(
-                types.InlineKeyboardButton("📋 Все команды", callback_data="show_help"),
-                types.InlineKeyboardButton("🛡️ Модерация", callback_data="help_moderation"),
-                types.InlineKeyboardButton("💕 RP команды", callback_data="help_rp"),
-                types.InlineKeyboardButton("📊 Статистика", callback_data="help_stats"),
-                types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")
-            )
-            
-            bot.send_message(
-                message.chat.id,
-                welcome_text,
-                parse_mode='HTML',
-                reply_markup=markup
-            )
-            
-            try:
-                admin_text = (
-                    f"✅ <b>Бот добавлен в чат!</b>\n\n"
-                    f"📌 Чат: {chat_title}\n"
-                    f"🆔 ID: {message.chat.id}\n\n"
-                    f"Используй команду /admin для настроек."
-                )
-                bot.send_message(message.from_user.id, admin_text, parse_mode='HTML')
-            except:
-                pass
-            
-            break
-
-########## СТАРТ ##########
+########## КОМАНДЫ ##########
 @bot.message_handler(commands=['start'])
-def start_message(message):
-    analytic(message)
-    
-    bot_username = "Barbariska_robot"
-    add_to_chat_url = f"https://t.me/{bot_username}?startgroup=true"
-    
+def cmd_start(message):
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.InlineKeyboardButton("➕ Добавить в чат", url=add_to_chat_url),
-        types.InlineKeyboardButton("📋 Команды", callback_data="show_help"),
-        types.InlineKeyboardButton("💎 Премиум", callback_data="show_premium"),
-        types.InlineKeyboardButton("🛡️ Модерация", callback_data="help_moderation"),
-        types.InlineKeyboardButton("💕 RP команды", callback_data="help_rp"),
-        types.InlineKeyboardButton("📊 Статистика", callback_data="help_stats"),
-        types.InlineKeyboardButton("💍 Браки", callback_data="help_marriage"),
-        types.InlineKeyboardButton("🎲 Игры", callback_data="help_games"),
-        types.InlineKeyboardButton("⚙️ Админ панель", callback_data="admin_panel")
+        types.InlineKeyboardButton("📋 Команды", callback_data="help"),
+        types.InlineKeyboardButton("💎 Премиум", callback_data="premium"),
+        types.InlineKeyboardButton("🛡️ Модерация", callback_data="mod_help"),
+        types.InlineKeyboardButton("💕 RP", callback_data="rp_help"),
+        types.InlineKeyboardButton("⚙️ Админ", callback_data="admin")
     )
-    
-    welcome_text = (
-        f"🍬 <b>BARBARIS BOT</b> 🍬\n\n"
-        f"Твой верный помощник в чате!\n\n"
-        f"✅ Модерация\n"
-        f"✅ RP команды ({len(rp_data)} шт)\n"
-        f"✅ Статистика и браки\n"
-        f"✅ Игры и развлечения\n\n"
-        f"👇 <b>Выбери действие:</b>"
-    )
-    
-    bot.send_message(
-        message.chat.id,
-        welcome_text,
-        parse_mode='HTML',
-        reply_markup=markup
-    )
+    bot.send_message(message.chat.id, 
+                     f"🍬 <b>Барбариска Бот</b>\n\nПривет, {message.from_user.first_name}!\nЯ помогу с модерацией и RP.\n\nRP команд: {len(rp_data)}", 
+                     parse_mode='HTML', reply_markup=markup)
 
-########## ПОМОЩЬ ##########
 @bot.message_handler(commands=['help'])
-@bot.message_handler(func=lambda message: message.text and message.text.lower() == '.хелп')
-def help_command(message):
+def cmd_help(message):
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.InlineKeyboardButton("🛡️ Модерация", callback_data="help_moderation"),
-        types.InlineKeyboardButton("💕 RP команды", callback_data="help_rp"),
-        types.InlineKeyboardButton("📊 Статистика", callback_data="help_stats"),
-        types.InlineKeyboardButton("💍 Браки", callback_data="help_marriage"),
-        types.InlineKeyboardButton("🎲 Игры", callback_data="help_games"),
-        types.InlineKeyboardButton("💎 Премиум", callback_data="show_premium"),
-        types.InlineKeyboardButton("➕ Добавить в чат", url=f"https://t.me/Barbariska_robot?startgroup=true"),
-        types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")
+        types.InlineKeyboardButton("🛡️ Модерация", callback_data="mod_help"),
+        types.InlineKeyboardButton("💕 RP", callback_data="rp_help"),
+        types.InlineKeyboardButton("💎 Премиум", callback_data="premium"),
+        types.InlineKeyboardButton("🏠 Главное", callback_data="main_menu")
     )
-    
-    help_text = (
-        f"🍬 <b>BARBARIS BOT - КОМАНДЫ</b> 🍬\n\n"
-        f"🛡️ <b>Модерация:</b>\n"
-        f"Бан, Кик, Мут [время], Варн, +чат, -чат и др.\n\n"
-        f"💕 <b>RP команды:</b> {len(rp_data)} шт\n"
-        f"обнять, поцеловать и другие\n\n"
-        f"📊 <b>Статистика:</b>\n"
-        f"кто я, топ дня/недели/месяца/вся\n\n"
-        f"💍 <b>Браки:</b>\n"
-        f"брак, развод, список браков\n\n"
-        f"🎲 <b>Игры:</b>\n"
-        f"!вероятность, рандом, пинг, кинг, нагрузка\n\n"
-        f"💎 <b>Премиум:</b>\n"
-        f"/premium - купить доступ ко всем RP командам\n\n"
-        f"👇 <b>Выбери категорию:</b>"
-    )
-    
-    bot.send_message(
-        message.chat.id,
-        help_text,
-        parse_mode='HTML',
-        reply_markup=markup
-    )
+    bot.send_message(message.chat.id, 
+                     "📋 <b>Команды бота</b>\n\n• /start - старт\n• /help - помощь\n• /premium - премиум\n• /admin - админка", 
+                     parse_mode='HTML', reply_markup=markup)
 
-########## ПАНЕЛЬ АДМИНИСТРАТОРА ##########
+########## АДМИН ПАНЕЛЬ ##########
 @bot.message_handler(commands=['admin'])
-def admin_panel_command(message):
+def cmd_admin(message):
     if not have_rights(message):
+        bot.reply_to(message, "❌ Только для админов!")
         return
-    
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.InlineKeyboardButton("⚙️ Настройки чата", callback_data="admin_settings"),
-        types.InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast_menu"),
+        types.InlineKeyboardButton("⚙️ Настройки", callback_data="admin_settings"),
+        types.InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast"),
         types.InlineKeyboardButton("👋 Приветствие", callback_data="admin_welcome"),
         types.InlineKeyboardButton("📜 Правила", callback_data="admin_rules"),
         types.InlineKeyboardButton("🚫 Антимат", callback_data="admin_antiswear"),
-        types.InlineKeyboardButton("📊 Антифлуд", callback_data="admin_antiflood"),
         types.InlineKeyboardButton("🔐 Капча", callback_data="admin_captcha"),
-        types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")
+        types.InlineKeyboardButton("🏠 Главное", callback_data="main_menu")
     )
-    
-    bot.send_message(
-        message.chat.id,
-        "🛡️ <b>Панель администратора</b>\n\nВыбери, что хочешь настроить:",
-        parse_mode='HTML',
-        reply_markup=markup
-    )
+    bot.send_message(message.chat.id, "🛡️ <b>Панель администратора</b>", parse_mode='HTML', reply_markup=markup)
 
 ########## ПРЕМИУМ ##########
 @bot.message_handler(commands=['premium'])
-@bot.message_handler(func=lambda message: message.text and message.text.lower() == 'премиум')
-def premium_command(message):
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        types.InlineKeyboardButton("💎 Премиум на месяц - 50 ⭐", callback_data="buy_month"),
-        types.InlineKeyboardButton("👑 VIP навсегда - 1000 ⭐", callback_data="buy_vip"),
-        types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")
-    )
-    
-    sub = get_user_subscription(message.from_user.id)
-    
-    if sub['type'] != 'free':
-        expires = sub['expires'].strftime('%d.%m.%Y') if sub['expires'] else 'никогда'
-        status = f"✅ Твой статус: <b>{sub['type'].upper()}</b> до {expires}"
-    else:
-        status = "🎁 Твой статус: <b>Бесплатный</b>"
-    
-    text = (
-        f"💎 <b>ПРЕМИУМ ДОСТУП</b>\n\n"
-        f"{status}\n\n"
-        f"🎁 <b>Бесплатно:</b>\n"
-        f"• 15 RP команд в день\n"
-        f"• Только базовые команды\n\n"
-        f"💎 <b>Премиум (50 ⭐/мес):</b>\n"
-        f"• Безлимитные RP команды\n"
-        f"• Все {len(rp_data)} команд\n"
-        f"• 18+ контент\n\n"
-        f"👑 <b>VIP (1000 ⭐ навсегда):</b>\n"
-        f"• Пожизненный доступ\n"
-        f"• Особый статус в профиле"
-    )
-    
-    bot.send_message(
-        message.chat.id,
-        text,
-        parse_mode='HTML',
-        reply_markup=markup
-    )
-
-@bot.message_handler(commands=['my_sub'])
-def my_subscription(message):
-    sub = get_user_subscription(message.from_user.id)
-    
-    if sub['type'] == 'free':
-        used = check_rp_limit(message.from_user.id)
-        left = 15 - used
-        text = (
-            f"🎁 <b>Твой тариф: Бесплатный</b>\n\n"
-            f"📊 Использовано RP сегодня: {used}/15\n"
-            f"⏳ Осталось: {left}\n\n"
-            f"Купи премиум: /premium"
-        )
-    else:
-        expires = sub['expires'].strftime('%d.%m.%Y') if sub['expires'] else 'никогда'
-        text = (
-            f"💎 <b>Твой тариф: {sub['type'].upper()}</b>\n\n"
-            f"⏳ Действует до: {expires}\n"
-            f"✨ Доступны все RP-команды без лимитов"
-        )
-    
-    bot.reply_to(message, text, parse_mode='HTML')
-
-########## ОБРАБОТЧИКИ КОМАНД ##########
-@bot.message_handler(commands=['list'])
-def handle_list(message):
-    db = read_db()
-    if message.from_user.id != db['owner_id']:
-        return
-    
-    chats = get_all_chats()
-    if not chats:
-        bot.send_message(message.chat.id, "Бот не добавлен ни в один чат.")
-        return
-    
-    text = f"📋 <b>Список чатов ({len(chats)}):</b>\n\n"
-    for chat_id in chats:
-        try:
-            chat = bot.get_chat(int(chat_id))
-            title = chat.title or "Private Chat"
-            text += f"• {title} (ID: {chat_id})\n"
-        except:
-            text += f"• Chat ID: {chat_id} (недоступен)\n"
-    
-    bot.send_message(message.chat.id, text, parse_mode='HTML')
-
-########## ТОПЫ ##########
-@bot.message_handler(func=lambda message: message.text and message.text.upper() in ['ТОП ДЕНЬ', 'ТОП ДНЯ'])
-def handle_top_day(message):
-    chat_id = str(message.chat.id)
-    daily_stats = get_daily_stats(chat_id)
-    sorted_stats = sorted(daily_stats.items(), key=lambda x: x[1], reverse=True)[:10]
-    
-    if not sorted_stats:
-        bot.send_message(message.chat.id, "📊 Статистика за сегодня пока пуста.")
-        return
-    
-    text = "📅 <b>Топ за сегодня:</b>\n\n"
-    for i, (user_id, count) in enumerate(sorted_stats, 1):
-        user_link = get_user_link_sync(int(user_id), message.chat.id)
-        text += f"{i}. {user_link} — {count} сообщ.\n"
-    
-    bot.send_message(message.chat.id, text, parse_mode='HTML', disable_web_page_preview=True)
-
-@bot.message_handler(func=lambda message: message.text and message.text.upper() in ['ТОП НЕДЕЛЯ', 'ТОП НЕДЕЛИ'])
-def handle_top_week(message):
-    chat_id = str(message.chat.id)
-    weekly_stats = get_weekly_stats(chat_id)
-    sorted_stats = sorted(weekly_stats.items(), key=lambda x: x[1], reverse=True)[:10]
-    
-    if not sorted_stats:
-        bot.send_message(message.chat.id, "📊 Статистика за неделю пока пуста.")
-        return
-    
-    text = "📆 <b>Топ за неделю:</b>\n\n"
-    for i, (user_id, count) in enumerate(sorted_stats, 1):
-        user_link = get_user_link_sync(int(user_id), message.chat.id)
-        text += f"{i}. {user_link} — {count} сообщ.\n"
-    
-    bot.send_message(message.chat.id, text, parse_mode='HTML', disable_web_page_preview=True)
-
-@bot.message_handler(func=lambda message: message.text and message.text.upper() in ['ТОП МЕСЯЦ', 'ТОП МЕСЯЦА'])
-def handle_top_month(message):
-    chat_id = str(message.chat.id)
-    monthly_stats = get_monthly_stats(chat_id)
-    sorted_stats = sorted(monthly_stats.items(), key=lambda x: x[1], reverse=True)[:10]
-    
-    if not sorted_stats:
-        bot.send_message(message.chat.id, "📊 Статистика за месяц пока пуста.")
-        return
-    
-    text = "📅 <b>Топ за месяц:</b>\n\n"
-    for i, (user_id, count) in enumerate(sorted_stats, 1):
-        user_link = get_user_link_sync(int(user_id), message.chat.id)
-        text += f"{i}. {user_link} — {count} сообщ.\n"
-    
-    bot.send_message(message.chat.id, text, parse_mode='HTML', disable_web_page_preview=True)
-
-@bot.message_handler(func=lambda message: message.text and message.text.upper() in ['ТОП', 'ТОП ВСЯ'])
-def handle_top_all_time(message):
-    chat_id = str(message.chat.id)
-    all_time_stats = get_all_time_stats(chat_id)
-    sorted_stats = sorted(all_time_stats.items(), key=lambda x: x[1], reverse=True)[:10]
-    
-    if not sorted_stats:
-        bot.send_message(message.chat.id, "📊 Статистика за всё время пока пуста.")
-        return
-    
-    text = "🏆 <b>Топ за всё время:</b>\n\n"
-    for i, (user_id, count) in enumerate(sorted_stats, 1):
-        user_link = get_user_link_sync(int(user_id), message.chat.id)
-        text += f"{i}. {user_link} — {count} сообщ.\n"
-    
-    bot.send_message(message.chat.id, text, parse_mode='HTML', disable_web_page_preview=True)
-
-########## КТО Я ##########
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'КТО Я')
-def who_am_i(message):
-    user_id = message.from_user.id
-    chat_id = str(message.chat.id)
-    
-    sub = get_user_subscription(user_id)
-    sub_text = "💎 Премиум" if sub['type'] != 'free' else "🎁 Бесплатный"
-    
-    display_name = get_nickname(user_id) or message.from_user.first_name
-    display_name = display_name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-    
-    daily = get_user_daily_stats(chat_id, user_id)
-    weekly = get_user_weekly_stats(chat_id, user_id)
-    all_time = get_user_all_time_stats(chat_id, user_id)
-    
-    description = get_description(user_id)
-    desc_text = f"\n📝 {description}" if description else ""
-    
-    spouse_id = get_spouse(chat_id, user_id)
-    spouse_text = ""
-    if spouse_id:
-        spouse_link = get_user_link_sync(spouse_id, message.chat.id)
-        spouse_text = f"\n💍 В браке с: {spouse_link}"
-    
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT last_activity FROM user_data WHERE chat_id = ? AND user_id = ? LIMIT 1',
-                  (chat_id, user_id))
-    result = cursor.fetchone()
-    last_active = format_time_ago(result[0]) if result and result[0] else "Нет данных"
-    conn.close()
-    
-    text = (
-        f"👤 <b>{display_name}</b>\n"
-        f"{sub_text}{desc_text}{spouse_text}\n\n"
-        f"⏱️ Последний актив: {last_active}\n"
-        f"📊 Статистика (д|н|всё): {daily} | {weekly} | {all_time}"
-    )
-    
-    bot.reply_to(message, text, parse_mode='HTML')
-
-########## КТО ТЫ ##########
-@bot.message_handler(func=lambda message: message.text and message.text.upper().startswith('КТО ТЫ'))
-def who_are_you(message):
-    try:
-        target_id = None
-        
-        if message.reply_to_message:
-            target_id = message.reply_to_message.from_user.id
-        else:
-            parts = message.text.split()
-            for part in parts:
-                if part.startswith('@'):
-                    username = part[1:].lower()
-                    users = read_users()
-                    hashed = sha(username)
-                    if hashed in users:
-                        target_id = users[hashed]
-                    break
-        
-        if not target_id:
-            bot.reply_to(message, "❓ Укажи пользователя: ответь на сообщение или напиши @username")
-            return
-        
-        chat_id = str(message.chat.id)
-        
-        sub = get_user_subscription(target_id)
-        sub_text = "💎 Премиум" if sub['type'] != 'free' else "🎁 Бесплатный"
-        
-        display_name = get_nickname(target_id) or "Пользователь"
-        display_name = display_name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-        user_link = get_user_link_sync(target_id, message.chat.id)
-        
-        daily = get_user_daily_stats(chat_id, target_id)
-        weekly = get_user_weekly_stats(chat_id, target_id)
-        all_time = get_user_all_time_stats(chat_id, target_id)
-        
-        description = get_description(target_id)
-        desc_text = f"\n📝 {description}" if description else ""
-        
-        spouse_id = get_spouse(chat_id, target_id)
-        spouse_text = ""
-        if spouse_id:
-            spouse_link = get_user_link_sync(spouse_id, message.chat.id)
-            spouse_text = f"\n💍 В браке с: {spouse_link}"
-        
-        conn = sqlite3.connect('bot_data.db')
-        cursor = conn.cursor()
-        cursor.execute('SELECT last_activity FROM user_data WHERE chat_id = ? AND user_id = ? LIMIT 1',
-                      (chat_id, target_id))
-        result = cursor.fetchone()
-        last_active = format_time_ago(result[0]) if result and result[0] else "Нет данных"
-        conn.close()
-        
-        text = (
-            f"👤 <b>{user_link}</b>\n"
-            f"{sub_text}{desc_text}{spouse_text}\n\n"
-            f"⏱️ Последний актив: {last_active}\n"
-            f"📊 Статистика (д|н|всё): {daily} | {weekly} | {all_time}"
-        )
-        
-        bot.reply_to(message, text, parse_mode='HTML')
-    except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
-
-########## ВЕРОЯТНОСТЬ ##########
-@bot.message_handler(func=lambda message: message.text and message.text.lower().startswith('!вероятность'))
-def probability_command(message):
-    try:
-        text = message.text[12:].strip()
-        
-        if not text:
-            bot.reply_to(message, "❓ Пример: !вероятность Андрей лох?")
-            return
-        
-        prob = random.randint(0, 100)
-        
-        if prob < 10:
-            emoji = "😱"
-            comment = "Ни за что!"
-        elif prob < 30:
-            emoji = "🤔"
-            comment = "Вряд ли"
-        elif prob < 50:
-            emoji = "😐"
-            comment = "50 на 50"
-        elif prob < 70:
-            emoji = "😏"
-            comment = "Вероятно"
-        elif prob < 90:
-            emoji = "😎"
-            comment = "Очень вероятно"
-        else:
-            emoji = "🔥"
-            comment = "Абсолютно точно!"
-        
-        response = (
-            f"🎲 <b>Вопрос:</b> {text}\n\n"
-            f"📊 <b>Вероятность:</b> {prob}%\n"
-            f"{emoji} <i>{comment}</i>"
-        )
-        
-        bot.reply_to(message, response, parse_mode='HTML')
-    except Exception as e:
-        bot.reply_to(message, "❌ Что-то пошло не так. Попробуй ещё раз.")
-
-@bot.message_handler(func=lambda message: message.text and message.text.lower().startswith('!вер'))
-def probability_short_command(message):
-    text = message.text[4:].strip()
-    fake_message = message
-    fake_message.text = f"!вероятность {text}"
-    probability_command(fake_message)
-
-########## РАНДОМ ##########
-@bot.message_handler(func=lambda message: message.text and message.text.lower().startswith('рандом'))
-def random_command(message):
-    try:
-        parts = message.text.split()
-        if len(parts) >= 3:
-            a = int(parts[1])
-            b = int(parts[2])
-            if a > b:
-                a, b = b, a
-            result = random.randint(a, b)
-            bot.reply_to(message, f"🎲 Случайное число от {a} до {b}: <b>{result}</b>", parse_mode='HTML')
-        else:
-            bot.reply_to(message, "❓ Пример: рандом 1 100")
-    except:
-        bot.reply_to(message, "❌ Неправильный формат. Пример: рандом 1 100")
-
-########## ПИНГ ##########
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'ПИНГ')
-def ping_command(message):
-    bot.reply_to(message, "🏓 ПОНГ")
-
-########## КИНГ (ИГРА В СЛОВА) ##########
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'КИНГ')
-def king_command(message):
-    rules = (
-        "👑 <b>Игра в слова «Кинг/Конг»</b>\n\n"
-        "Правила:\n"
-        "1. Первый игрок пишет слово (существительное)\n"
-        "2. Следующий игрок должен написать слово на последнюю букву предыдущего\n"
-        "3. Нельзя повторять слова\n"
-        "4. Начинается игра с команды КИНГ\n\n"
-        "Пример:\n"
-        "Игрок1: КИНГ\n"
-        "Игрок2: арбуз\n"
-        "Игрок3: замок\n"
-        "Игрок4: кот\n"
-        "И т.д.\n\n"
-        "Для начала игры напиши: КИНГ"
-    )
-    
-    bot.reply_to(message, rules, parse_mode='HTML')
-
-@bot.message_handler(func=lambda message: True)
-def word_game_handler(message):
-    if not message.text or len(message.text) > 20 or message.chat.type == 'private':
-        return
-    
-    game = get_word_game(message.chat.id)
-    
-    if not game:
-        return
-    
-    last_word, last_player, last_time = game
-    
-    if message.from_user.id == last_player:
-        return
-    
-    last_time_dt = datetime.fromisoformat(last_time)
-    if (datetime.now() - last_time_dt).total_seconds() > 300:
-        save_word_game(message.chat.id, None, None)
-        return
-    
-    last_letter = last_word[-1].upper()
-    if last_letter in ['Ы', 'Ь', 'Ъ', 'Й']:
-        last_letter = last_word[-2].upper()
-    
-    first_letter = message.text[0].upper()
-    
-    if first_letter == last_letter:
-        save_word_game(message.chat.id, message.text, message.from_user.id)
-        bot.reply_to(message, f"✅ {message.text}")
-
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'БОТ')
-def bot_command(message):
-    bot.reply_to(message, "✅ На месте!")
-
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'КАКАЯ НАГРУЗКА')
-def load_command(message):
-    uptime = get_uptime()
-    bot.reply_to(message, f"📊 <b>Нагрузка:</b>\n{uptime}", parse_mode='HTML')
-
-########## БРАКИ ##########
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'БРАК')
-def marriage_propose(message):
-    target_id = get_target_from_text(message)
-    
-    if not target_id:
-        bot.reply_to(message, "❓ Укажи пользователя: @username или ответь на сообщение")
-        return
-    
-    proposer_id = message.from_user.id
-    chat_id = message.chat.id
-    
-    if proposer_id == target_id:
-        bot.reply_to(message, "❌ Нельзя вступить в брак с самим собой.")
-        return
-    
-    if is_married(chat_id, proposer_id):
-        bot.reply_to(message, "❌ Вы уже состоите в браке в этом чате.")
-        return
-    
-    if is_married(chat_id, target_id):
-        bot.reply_to(message, "❌ Этот пользователь уже состоит в браке.")
-        return
-    
-    request_id = str(uuid.uuid4())
-    save_marriage_request(request_id, chat_id, proposer_id, message.from_user.first_name, target_id)
-    
-    proposer_link = get_user_link_sync(proposer_id, chat_id)
-    target_link = get_user_link_sync(target_id, chat_id)
-    
+def cmd_premium(message):
     markup = types.InlineKeyboardMarkup()
-    markup.add(
-        types.InlineKeyboardButton("✅ Согласиться", callback_data=f"marriage_agree_{request_id}"),
-        types.InlineKeyboardButton("❌ Отказаться", callback_data=f"marriage_reject_{request_id}")
-    )
-    
-    bot.send_message(
-        chat_id,
-        f"💍 {proposer_link} хочет вступить в брак с {target_link}!",
-        parse_mode='HTML',
-        reply_markup=markup
-    )
-
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'РАЗВОД')
-def marriage_divorce(message):
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    
-    spouse_id = dissolve_marriage(chat_id, user_id)
-    if spouse_id:
-        spouse_link = get_user_link_sync(spouse_id, chat_id)
-        bot.reply_to(message, f"💔 Развод оформлен. Сожалеем, {spouse_link}.", parse_mode='HTML')
-    else:
-        bot.reply_to(message, "❌ Вы не состоите в браке в этом чате.")
-
-@bot.message_handler(func=lambda message: message.text and message.text.upper() in ['БРАКИ', 'СПИСОК БРАКОВ'])
-def marriage_list(message):
-    marriages = get_all_marriages(message.chat.id)
-    
-    if not marriages:
-        bot.reply_to(message, "💔 В этом чате нет зарегистрированных браков.")
-        return
-    
-    text = "💍 <b>Список браков в чате:</b>\n\n"
-    for i, (sp1, sp2, created_str) in enumerate(marriages, 1):
-        link1 = get_user_link_sync(sp1, message.chat.id)
-        link2 = get_user_link_sync(sp2, message.chat.id)
-        created_dt = datetime.strptime(created_str, '%Y-%m-%d %H:%M:%S')
-        days = (datetime.now() - created_dt).days
-        text += f"{i}. {link1} 💕 {link2} ({days} дн.)\n"
-    
-    bot.send_message(message.chat.id, text, parse_mode='HTML')
-
-########## НИКИ И ОПИСАНИЯ ##########
-@bot.message_handler(func=lambda message: message.text and message.text.upper().startswith('+НИК '))
-def set_nick(message):
-    nick = message.text[5:].strip()
-    if nick:
-        set_nickname(message.from_user.id, nick)
-        bot.reply_to(message, f"✅ Ник установлен: {nick}")
-    else:
-        bot.reply_to(message, "❓ Укажите ник после +ник")
-
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == '-НИК')
-def remove_nick(message):
-    set_nickname(message.from_user.id, None)
-    bot.reply_to(message, "✅ Ник сброшен")
-
-@bot.message_handler(func=lambda message: message.text and message.text.upper().startswith('+ОПИСАНИЕ '))
-def set_desc(message):
-    desc = message.text[10:].strip()
-    if desc:
-        set_description(message.from_user.id, desc)
-        bot.reply_to(message, f"✅ Описание установлено: {desc}")
-    else:
-        bot.reply_to(message, "❓ Укажите описание после +описание")
-
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == '-ОПИСАНИЕ')
-def remove_desc(message):
-    set_description(message.from_user.id, None)
-    bot.reply_to(message, "✅ Описание сброшено")
-
-########## БАРБАРИС СКАЖИ ##########
-@bot.message_handler(func=lambda message: message.text and message.text.upper().startswith('БАРБАРИС СКАЖИ '))
-def barbaris_say(message):
-    text = message.text[14:].strip()
-    user_link = get_user_link_sync(message.from_user.id, message.chat.id)
-    bot.send_message(message.chat.id, f"{user_link} заставил меня сказать: {text}", parse_mode='HTML')
-
-@bot.message_handler(func=lambda message: message.text and message.text.upper().startswith('БАРБАРИС, СКАЖИ '))
-def barbaris_say_comma(message):
-    text = message.text[15:].strip()
-    user_link = get_user_link_sync(message.from_user.id, message.chat.id)
-    bot.send_message(message.chat.id, f"{user_link} заставил меня сказать: {text}", parse_mode='HTML')
+    markup.add(types.InlineKeyboardButton("💎 Купить 30 дней", callback_data="buy_30"))
+    bot.send_message(message.chat.id, 
+                     "💎 <b>Премиум</b>\n\n• Безлимитные RP\n• 15 RP/день бесплатно\n\n30 дней — 50 ⭐", 
+                     parse_mode='HTML', reply_markup=markup)
 
 ########## RP КОМАНДЫ ##########
-@bot.message_handler(func=lambda message: True)
-def rp_command_handler(message):
-    if not message.text or message.chat.type == 'private':
-        return
-    
+@bot.message_handler(func=lambda m: m.text and m.chat.type != 'private')
+def handle_rp(message):
     text = message.text.lower().strip()
-    words = text.split()
-    
-    if not words:
+    if not text:
+        return
+    cmd = text.split()[0]
+    if cmd not in rp_data:
         return
     
-    command = words[0]
+    target_id = get_target(message)
+    if not target_id:
+        target_id = message.from_user.id
     
-    if command not in rp_data:
-        return
+    sender = get_nick(message.from_user.id) or message.from_user.first_name
+    sender = sender.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    target = get_user_link(target_id, message.chat.id)
     
-    # Проверка прав
-    target_id = get_target_from_text(message)
-    target_name = get_name(message) if message.reply_to_message else "пользователь"
-    
-    if not target_id and len(words) > 1 and not words[1].startswith('@'):
-        # Self-команда
-        target_name = get_user_link_sync(message.from_user.id, message.chat.id)
-    
-    sender_id = message.from_user.id
-    sender_name = get_nickname(sender_id) or message.from_user.first_name
-    sender_name = sender_name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-    
-    # Проверка премиума
-    sub = get_user_subscription(sender_id)
-    is_premium = sub['type'] != 'free' and sub['expires'] and sub['expires'] > datetime.now()
-    
-    if not is_premium:
-        used = check_rp_limit(sender_id)
+    if not check_sub(message.from_user.id):
+        used = check_rp_limit(message.from_user.id)
         if used >= 15:
-            bot.reply_to(message, f"❌ Сегодняшний лимит RP-команд (15) исчерпан! Купи премиум: /premium")
+            bot.reply_to(message, "❌ Лимит 15 RP в день. Купи премиум!")
             return
-        increment_rp_usage(sender_id)
+        add_rp_usage(message.from_user.id)
     
-    # Получаем ответ
-    cmd_data = rp_data[command]
-    
+    data = rp_data[cmd]
     if random.random() < 0.3:
-        response = cmd_data['reject'].format(sender=sender_name, target=target_name)
+        resp = data.get('reject', data.get('accept', '')).format(sender=sender, target=target)
     else:
-        response = cmd_data['accept'].format(sender=sender_name, target=target_name)
-        if 'random_parts' in cmd_data and '{random_part}' in response:
-            response = response.replace('{random_part}', random.choice(cmd_data['random_parts']))
+        resp = data['accept'].format(sender=sender, target=target)
     
-    bot.reply_to(message, response, parse_mode='HTML')
+    bot.reply_to(message, resp, parse_mode='HTML')
 
 ########## МОДЕРАЦИЯ ##########
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'БАН')
-def ban_command(message):
+@bot.message_handler(func=lambda m: m.text and m.text.upper().startswith('БАН'))
+def mod_ban(message):
     if not have_rights(message):
+        bot.reply_to(message, "❌ Нет прав!")
         return
-    
-    target = get_target_from_text(message)
+    target = get_target(message)
     if not target:
-        bot.reply_to(message, "❓ Укажи пользователя: @username или ответь на сообщение")
+        bot.reply_to(message, "❌ Укажи пользователя")
         return
-    
+    if is_admin(message.chat.id, target):
+        bot.reply_to(message, "❌ Нельзя забанить админа!")
+        return
     try:
         bot.ban_chat_member(message.chat.id, target)
-        bot.reply_to(message, f"🔨 Пользователь забанен.")
+        bot.reply_to(message, f"🔨 Забанен {get_user_link(target, message.chat.id)}", parse_mode='HTML')
     except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
+        bot.reply_to(message, f"❌ {e}")
 
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'РАЗБАН')
-def unban_command(message):
+@bot.message_handler(func=lambda m: m.text and m.text.upper().startswith('КИК'))
+def mod_kick(message):
     if not have_rights(message):
+        bot.reply_to(message, "❌ Нет прав!")
         return
-    
-    target = get_target_from_text(message)
+    target = get_target(message)
     if not target:
-        bot.reply_to(message, "❓ Укажи пользователя: @username или ответь на сообщение")
+        bot.reply_to(message, "❌ Укажи пользователя")
         return
-    
-    try:
-        bot.unban_chat_member(message.chat.id, target)
-        bot.reply_to(message, f"🔓 Пользователь разбанен.")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
-
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'КИК')
-def kick_command(message):
-    if not have_rights(message):
+    if is_admin(message.chat.id, target):
+        bot.reply_to(message, "❌ Нельзя кикнуть админа!")
         return
-    
-    target = get_target_from_text(message)
-    if not target:
-        bot.reply_to(message, "❓ Укажи пользователя: @username или ответь на сообщение")
-        return
-    
     try:
         bot.ban_chat_member(message.chat.id, target)
         bot.unban_chat_member(message.chat.id, target)
-        bot.reply_to(message, f"👢 Пользователь кикнут.")
+        bot.reply_to(message, f"👢 Кикнут {get_user_link(target, message.chat.id)}", parse_mode='HTML')
     except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
+        bot.reply_to(message, f"❌ {e}")
 
-@bot.message_handler(func=lambda message: message.text and message.text.upper().startswith('МУТ'))
-def mute_command(message):
+@bot.message_handler(func=lambda m: m.text and m.text.upper().startswith('МУТ'))
+def mod_mute(message):
     if not have_rights(message):
+        bot.reply_to(message, "❌ Нет прав!")
         return
-    
-    target = get_target_from_text(message)
+    target = get_target(message)
     if not target:
-        bot.reply_to(message, "❓ Укажи пользователя: @username или ответь на сообщение")
+        bot.reply_to(message, "❌ Укажи пользователя")
         return
-    
-    time_seconds, time_text = parse_time(message.text)
-    
-    if time_seconds:
-        until_date = message.date + time_seconds
-        time_str = f" на {time_text}"
-    else:
-        until_date = message.date + 3600
-        time_str = " на 1 час"
-    
+    if is_admin(message.chat.id, target):
+        bot.reply_to(message, "❌ Нельзя замутить админа!")
+        return
+    seconds = parse_time(message.text)
     try:
-        bot.restrict_chat_member(
-            message.chat.id, 
-            target, 
-            until_date=until_date,
-            can_send_messages=False
-        )
-        bot.reply_to(message, f"🔇 Пользователь замьючен{time_str}.")
+        bot.restrict_chat_member(message.chat.id, target, until_date=message.date+seconds, can_send_messages=False)
+        bot.reply_to(message, f"🔇 Замьючен {get_user_link(target, message.chat.id)} на {format_time(seconds)}", parse_mode='HTML')
     except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
+        bot.reply_to(message, f"❌ {e}")
 
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'РАЗМУТ')
-def unmute_command(message):
+@bot.message_handler(func=lambda m: m.text and m.text.upper() == 'РАЗМУТ')
+def mod_unmute(message):
     if not have_rights(message):
+        bot.reply_to(message, "❌ Нет прав!")
         return
-    
-    target = get_target_from_text(message)
+    target = get_target(message)
     if not target:
-        bot.reply_to(message, "❓ Укажи пользователя: @username или ответь на сообщение")
+        bot.reply_to(message, "❌ Укажи пользователя")
         return
-    
     try:
-        bot.restrict_chat_member(
-            message.chat.id, 
-            target,
-            can_send_messages=True,
-            can_send_media_messages=True,
-            can_send_other_messages=True,
-            can_add_web_page_previews=True
-        )
-        bot.reply_to(message, f"🔊 Пользователь размьючен.")
+        bot.restrict_chat_member(message.chat.id, target, can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True)
+        bot.reply_to(message, f"🔊 Размьючен {get_user_link(target, message.chat.id)}", parse_mode='HTML')
     except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
+        bot.reply_to(message, f"❌ {e}")
 
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'ВАРН')
-def warn_command(message):
+@bot.message_handler(func=lambda m: m.text and m.text.upper() == 'ВАРН')
+def mod_warn(message):
     if not have_rights(message):
+        bot.reply_to(message, "❌ Нет прав!")
         return
-    
-    target = get_target_from_text(message)
+    target = get_target(message)
     if not target:
-        bot.reply_to(message, "❓ Укажи пользователя: @username или ответь на сообщение")
+        bot.reply_to(message, "❌ Укажи пользователя")
         return
-    
     conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT warn_count FROM warns WHERE user_id = ?', (target,))
-    result = cursor.fetchone()
-    
-    if result:
-        warn_count = result[0] + 1
-        cursor.execute('UPDATE warns SET warn_count = ?, last_warn_time = ? WHERE user_id = ?',
-                      (warn_count, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), target))
-    else:
-        warn_count = 1
-        cursor.execute('INSERT INTO warns (user_id, warn_count, last_warn_time) VALUES (?, ?, ?)',
-                      (target, warn_count, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-    
+    c = conn.cursor()
+    c.execute('SELECT count FROM warns WHERE user_id = ?', (target,))
+    r = c.fetchone()
+    cnt = (r[0] if r else 0) + 1
+    c.execute('INSERT OR REPLACE INTO warns VALUES (?, ?, ?)', (target, cnt, datetime.now().isoformat()))
     conn.commit()
     conn.close()
-    
-    if warn_count >= 3:
+    if cnt >= 3:
         try:
             bot.ban_chat_member(message.chat.id, target)
-            bot.reply_to(message, f"⚠️ 3 предупреждения - пользователь забанен!")
+            bot.reply_to(message, f"⚠️ 3/3 — забанен!")
         except:
-            bot.reply_to(message, f"⚠️ Предупреждение {warn_count}/3")
+            bot.reply_to(message, f"⚠️ Варн {cnt}/3")
     else:
-        bot.reply_to(message, f"⚠️ Предупреждение {warn_count}/3")
+        bot.reply_to(message, f"⚠️ Варн {cnt}/3")
 
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'СНЯТЬ ВАРН')
-def unwarn_command(message):
-    if not have_rights(message):
-        return
-    
-    target = get_target_from_text(message)
+########## БРАК ##########
+@bot.message_handler(func=lambda m: m.text and m.text.upper() == 'БРАК')
+def cmd_marry(message):
+    target = get_target(message)
     if not target:
-        bot.reply_to(message, "❓ Укажи пользователя: @username или ответь на сообщение")
+        bot.reply_to(message, "❌ Укажи пользователя")
         return
-    
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT warn_count FROM warns WHERE user_id = ?', (target,))
-    result = cursor.fetchone()
-    
-    if result and result[0] > 0:
-        if result[0] == 1:
-            cursor.execute('DELETE FROM warns WHERE user_id = ?', (target,))
-            bot.reply_to(message, f"✅ Предупреждения сняты полностью.")
-        else:
-            cursor.execute('UPDATE warns SET warn_count = warn_count - 1 WHERE user_id = ?', (target,))
-            bot.reply_to(message, f"✅ Снято одно предупреждение. Осталось: {result[0]-1}")
+    if target == message.from_user.id:
+        bot.reply_to(message, "❌ С собой нельзя")
+        return
+    if is_married(message.chat.id, message.from_user.id):
+        bot.reply_to(message, "❌ Ты уже в браке")
+        return
+    if is_married(message.chat.id, target):
+        bot.reply_to(message, "❌ Он/она уже в браке")
+        return
+    req_id = str(uuid.uuid4())
+    add_marry_req(req_id, message.chat.id, message.from_user.id, message.from_user.first_name, target)
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton("✅ Да", callback_data=f"marry_yes_{req_id}"),
+        types.InlineKeyboardButton("❌ Нет", callback_data=f"marry_no_{req_id}")
+    )
+    bot.send_message(message.chat.id, 
+                     f"{get_user_link(message.from_user.id, message.chat.id)} хочет брак с {get_user_link(target, message.chat.id)}!",
+                     parse_mode='HTML', reply_markup=markup)
+
+@bot.message_handler(func=lambda m: m.text and m.text.upper() == 'РАЗВОД')
+def cmd_divorce(message):
+    spouse = del_marriage(message.chat.id, message.from_user.id)
+    if spouse:
+        bot.reply_to(message, f"💔 Развод с {get_user_link(spouse, message.chat.id)}", parse_mode='HTML')
     else:
-        bot.reply_to(message, "❌ У пользователя нет предупреждений.")
-    
-    conn.commit()
-    conn.close()
+        bot.reply_to(message, "❌ Ты не в браке")
 
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == '-СМС')
-def delete_message(message):
-    if not have_rights(message):
-        return
-    
-    if not message.reply_to_message:
-        bot.reply_to(message, "❌ Нужно ответить на сообщение для удаления.")
-        return
-    
-    try:
-        bot.delete_message(message.chat.id, message.reply_to_message.message_id)
-        bot.delete_message(message.chat.id, message.message_id)
-    except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
+########## НИКИ ##########
+@bot.message_handler(func=lambda m: m.text and m.text.upper().startswith('+НИК '))
+def set_nick_cmd(message):
+    nick = message.text[5:].strip()
+    if nick:
+        set_nick(message.from_user.id, nick)
+        bot.reply_to(message, f"✅ Ник: {nick}")
 
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'ПИН')
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'ЗАКРЕП')
-def pin_message(message):
-    if not have_rights(message):
-        return
-    
-    if not message.reply_to_message:
-        bot.reply_to(message, "❌ Нужно ответить на сообщение для закрепления.")
-        return
-    
-    try:
-        bot.pin_chat_message(message.chat.id, message.reply_to_message.message_id)
-        bot.reply_to(message, f"📌 Сообщение закреплено.")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
+@bot.message_handler(func=lambda m: m.text and m.text.upper().startswith('+ОПИСАНИЕ '))
+def set_bio_cmd(message):
+    bio = message.text[10:].strip()
+    if bio:
+        set_bio(message.from_user.id, bio)
+        bot.reply_to(message, f"✅ Описание: {bio}")
 
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == 'АНПИН')
-def unpin_message(message):
-    if not have_rights(message):
-        return
-    
-    try:
-        bot.unpin_chat_message(message.chat.id)
-        bot.reply_to(message, f"🔓 Сообщение откреплено.")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
-
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == '+ЧАТ')
-def open_chat(message):
-    if not have_rights(message):
-        return
-    
-    try:
-        bot.set_chat_permissions(message.chat.id, types.ChatPermissions(
-            can_send_messages=True,
-            can_send_media_messages=True,
-            can_send_other_messages=True,
-            can_add_web_page_previews=True
-        ))
-        bot.reply_to(message, f"🔓 Чат открыт для всех.")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
-
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == '-ЧАТ')
-def close_chat(message):
-    if not have_rights(message):
-        return
-    
-    try:
-        bot.set_chat_permissions(message.chat.id, types.ChatPermissions(
-            can_send_messages=False,
-            can_send_media_messages=False,
-            can_send_other_messages=False,
-            can_add_web_page_previews=False
-        ))
-        bot.reply_to(message, f"🔒 Чат закрыт.")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
-
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == '+АДМИН')
-def promote_admin(message):
-    db = read_db()
-    if message.from_user.id != db['owner_id']:
-        return
-    
-    target = get_target_from_text(message)
-    if not target:
-        bot.reply_to(message, "❓ Укажи пользователя: @username или ответь на сообщение")
-        return
-    
-    try:
-        bot.promote_chat_member(
-            message.chat.id, target,
-            can_manage_chat=True,
-            can_change_info=True,
-            can_delete_messages=True,
-            can_restrict_members=True,
-            can_invite_users=True,
-            can_pin_messages=True
-        )
-        bot.reply_to(message, f"👑 Пользователь повышен до администратора.")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
-
-@bot.message_handler(func=lambda message: message.text and message.text.upper() == '-АДМИН')
-def demote_admin(message):
-    db = read_db()
-    if message.from_user.id != db['owner_id']:
-        return
-    
-    target = get_target_from_text(message)
-    if not target:
-        bot.reply_to(message, "❓ Укажи пользователя: @username или ответь на сообщение")
-        return
-    
-    try:
-        bot.promote_chat_member(
-            message.chat.id, target,
-            can_manage_chat=False,
-            can_change_info=False,
-            can_delete_messages=False,
-            can_restrict_members=False,
-            can_invite_users=False,
-            can_pin_messages=False
-        )
-        bot.reply_to(message, f"👤 Пользователь понижен.")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
-
-########## ОБРАБОТЧИКИ CALLBACK ##########
-@bot.callback_query_handler(func=lambda call: True)
-def callback_handler(call):
-    if call.data == "main_menu":
-        bot.answer_callback_query(call.id)
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("➕ Добавить в чат", url=f"https://t.me/Barbariska_robot?startgroup=true"),
-            types.InlineKeyboardButton("📋 Команды", callback_data="show_help"),
-            types.InlineKeyboardButton("💎 Премиум", callback_data="show_premium"),
-            types.InlineKeyboardButton("🛡️ Модерация", callback_data="help_moderation"),
-            types.InlineKeyboardButton("💕 RP команды", callback_data="help_rp"),
-            types.InlineKeyboardButton("📊 Статистика", callback_data="help_stats"),
-            types.InlineKeyboardButton("💍 Браки", callback_data="help_marriage"),
-            types.InlineKeyboardButton("🎲 Игры", callback_data="help_games"),
-            types.InlineKeyboardButton("⚙️ Админ панель", callback_data="admin_panel")
-        )
-        bot.edit_message_text(
-            "🍬 <b>BARBARIS BOT</b> 🍬\n\nТвой верный помощник в чате!\n\n👇 <b>Выбери действие:</b>",
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode='HTML',
-            reply_markup=markup
-        )
-    
-    elif call.data == "show_help":
-        bot.answer_callback_query(call.id)
-        help_command(call.message)
-    
-    elif call.data == "show_premium":
-        bot.answer_callback_query(call.id)
-        premium_command(call.message)
-    
-    elif call.data == "admin_panel":
-        bot.answer_callback_query(call.id)
-        if not have_rights(call.message):
-            return
-        admin_panel_command(call.message)
-    
-    elif call.data == "help_moderation":
-        text = (
-            "🛡️ <b>Команды модерации</b>\n\n"
-            "🔨 <b>Бан</b> - заблокировать навсегда\n"
-            "👢 <b>Кик</b> - выгнать из чата\n"
-            "🔇 <b>Мут [время]</b> - запретить писать\n"
-            "🔊 <b>Размут</b> - снять mute\n"
-            "⚠️ <b>Варн</b> - предупреждение\n"
-            "✅ <b>Снять варн</b> - убрать предупреждение\n"
-            "❌ <b>-смс</b> - удалить сообщение\n"
-            "📌 <b>Пин / Закреп</b> - закрепить сообщение\n"
-            "🔓 <b>+чат</b> - открыть чат\n"
-            "🔒 <b>-чат</b> - закрыть чат\n"
-            "👑 <b>+админ / -админ</b> - управление админами\n\n"
-            "<i>Используй: команда @username или ответом на сообщение</i>"
-        )
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu"))
-        bot.edit_message_text(
-            text,
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode='HTML',
-            reply_markup=markup
-        )
-    
-    elif call.data == "help_rp":
-        commands = sorted(list(rp_data.keys()))[:30]
-        text = f"💕 <b>RP команды (всего {len(rp_data)}):</b>\n\n"
-        for i, cmd in enumerate(commands, 1):
-            text += f"{i}. <code>{cmd}</code>\n"
-        text += f"\nи ещё {len(rp_data)-30} команд...\n\n"
-        text += "<i>Используй: команда @username или ответом на сообщение</i>"
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu"))
-        bot.edit_message_text(
-            text,
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode='HTML',
-            reply_markup=markup
-        )
-    
-    elif call.data == "help_stats":
-        text = (
-            "📊 <b>Команды статистики</b>\n\n"
-            "👤 <b>кто я</b> - мой профиль\n"
-            "👥 <b>кто ты @ник</b> - профиль другого\n"
-            "📅 <b>топ дня</b> - топ за сегодня\n"
-            "📆 <b>топ недели</b> - топ за неделю\n"
-            "📅 <b>топ месяца</b> - топ за месяц\n"
-            "🏆 <b>топ вся</b> - топ за всё время\n\n"
-            "➕ <b>+ник [ник]</b> - установить ник\n"
-            "➖ <b>-ник</b> - сбросить ник\n"
-            "➕ <b>+описание [текст]</b> - установить описание\n"
-            "➖ <b>-описание</b> - сбросить описание"
-        )
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu"))
-        bot.edit_message_text(
-            text,
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode='HTML',
-            reply_markup=markup
-        )
-    
-    elif call.data == "help_marriage":
-        text = (
-            "💍 <b>Команды браков</b>\n\n"
-            "💍 <b>брак @ник</b> - предложить брак\n"
-            "💔 <b>развод</b> - развестись\n"
-            "📋 <b>браки</b> - список браков в чате\n\n"
-            "<i>Можно использовать ответом на сообщение</i>"
-        )
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu"))
-        bot.edit_message_text(
-            text,
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode='HTML',
-            reply_markup=markup
-        )
-    
-    elif call.data == "help_games":
-        text = (
-            "🎲 <b>Игры и развлечения</b>\n\n"
-            "🎲 <b>!вероятность [текст]</b> - узнать вероятность\n"
-            "🎲 <b>!вер [текст]</b> - короткая версия\n"
-            "🔢 <b>рандом A B</b> - случайное число\n"
-            "🏓 <b>пинг</b> - проверить связь\n"
-            "👑 <b>кинг</b> - начать игру в слова\n"
-            "🤖 <b>бот</b> - онлайн ли?\n"
-            "📊 <b>какая нагрузка</b> - статус сервера\n"
-            "🗣️ <b>Барбарис, скажи [текст]</b> - повторялка"
-        )
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu"))
-        bot.edit_message_text(
-            text,
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode='HTML',
-            reply_markup=markup
-        )
-    
-    elif call.data == "admin_settings":
-        if not have_rights(call.message):
-            return
-        settings = get_chat_settings(call.message.chat.id)
-        text = (
-            f"⚙️ <b>Настройки чата</b>\n\n"
-            f"🛡️ Автомодерация: {'✅' if settings['auto_moderation'] else '❌'}\n"
-            f"🚫 Антимат: {'✅' if settings['anti_swear'] else '❌'}\n"
-            f"📊 Антифлуд: {'✅' if settings['anti_flood'] else '❌'}\n"
-            f"🔐 Капча: {'✅' if settings['captcha_enabled'] else '❌'}\n"
-            f"⏱️ Время мута: {settings['mute_time']} сек\n\n"
-            f"👋 Приветствие: {'✅' if settings['welcome_message'] else '❌'}\n"
-            f"📜 Правила: {'✅' if settings['rules'] else '❌'}"
-        )
-        bot.edit_message_text(
-            text,
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode='HTML'
-        )
-    
-    elif call.data == "admin_antiswear":
-        if not have_rights(call.message):
-            return
-        settings = get_chat_settings(call.message.chat.id)
-        new_value = 0 if settings['anti_swear'] else 1
-        settings['anti_swear'] = new_value
-        save_chat_settings(call.message.chat.id, settings)
-        bot.answer_callback_query(call.id, f"Антимат {'включен' if new_value else 'выключен'}")
-        bot.edit_message_text(
-            f"✅ Антимат {'включен' if new_value else 'выключен'}",
-            call.message.chat.id,
-            call.message.message_id
-        )
-    
-    elif call.data == "admin_antiflood":
-        if not have_rights(call.message):
-            return
-        settings = get_chat_settings(call.message.chat.id)
-        new_value = 0 if settings['anti_flood'] else 1
-        settings['anti_flood'] = new_value
-        save_chat_settings(call.message.chat.id, settings)
-        bot.answer_callback_query(call.id, f"Антифлуд {'включен' if new_value else 'выключен'}")
-        bot.edit_message_text(
-            f"✅ Антифлуд {'включен' if new_value else 'выключен'}",
-            call.message.chat.id,
-            call.message.message_id
-        )
-    
-    elif call.data == "admin_captcha":
-        if not have_rights(call.message):
-            return
-        settings = get_chat_settings(call.message.chat.id)
-        new_value = 0 if settings['captcha_enabled'] else 1
-        settings['captcha_enabled'] = new_value
-        save_chat_settings(call.message.chat.id, settings)
-        bot.answer_callback_query(call.id, f"Капча {'включена' if new_value else 'выключена'}")
-        bot.edit_message_text(
-            f"✅ Капча {'включена' if new_value else 'выключена'}",
-            call.message.chat.id,
-            call.message.message_id
-        )
-    
-    elif call.data == "admin_welcome":
-        if not have_rights(call.message):
-            return
-        bot.edit_message_text(
-            "👋 Отправь новое приветственное сообщение для новых участников.\n"
-            "Используй {user} для имени пользователя.\nИли /cancel для отмены.",
-            call.message.chat.id,
-            call.message.message_id
-        )
-        bot.register_next_step_handler(call.message, set_welcome_message)
-    
-    elif call.data == "admin_rules":
-        if not have_rights(call.message):
-            return
-        bot.edit_message_text(
-            "📜 Отправь новые правила чата.\nИли /cancel для отмены.",
-            call.message.chat.id,
-            call.message.message_id
-        )
-        bot.register_next_step_handler(call.message, set_rules)
-    
-    elif call.data == "admin_broadcast_menu":
-        if not have_rights(call.message):
-            return
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("📢 Сделать рассылку", callback_data="admin_broadcast"),
-            types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")
-        )
-        bot.edit_message_text(
-            "📢 <b>Рассылка сообщений</b>\n\nВыбери действие:",
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode='HTML',
-            reply_markup=markup
-        )
-    
-    elif call.data == "admin_broadcast":
-        if not have_rights(call.message):
-            return
-        bot.edit_message_text(
-            "📢 Отправь сообщение для рассылки во все чаты.\n"
-            "В первой строке укажи задержку между сообщениями в секундах (1-60).\n"
-            "Пример:\n2\nПривет всем!\n\nИли /cancel для отмены.",
-            call.message.chat.id,
-            call.message.message_id
-        )
-        bot.register_next_step_handler(call.message, process_broadcast)
-    
-    elif call.data == "buy_month":
-        bot.answer_callback_query(call.id, "Покупка премиум на месяц...")
-        prices = [types.LabeledPrice(label="Премиум на месяц", amount=50)]
-        bot.send_invoice(
-            call.message.chat.id,
-            title="💎 Премиум на месяц",
-            description="30 дней безлимитных RP-команд",
-            invoice_payload="premium_month_30_50",
-            provider_token="",
-            currency="XTR",
-            prices=prices,
-            start_parameter="premium"
-        )
-    
-    elif call.data == "buy_vip":
-        bot.answer_callback_query(call.id, "Покупка VIP навсегда...")
-        prices = [types.LabeledPrice(label="VIP навсегда", amount=1000)]
-        bot.send_invoice(
-            call.message.chat.id,
-            title="👑 VIP навсегда",
-            description="Пожизненный доступ ко всем командам",
-            invoice_payload="premium_vip_36500_1000",
-            provider_token="",
-            currency="XTR",
-            prices=prices,
-            start_parameter="vip"
-        )
-    
-    elif call.data.startswith("marriage_"):
-        parts = call.data.split('_')
-        if len(parts) >= 3:
-            action = parts[1]
-            request_id = parts[2]
-            request = get_marriage_request(request_id)
-            
-            if not request:
-                bot.answer_callback_query(call.id, "❌ Запрос устарел")
-                return
-            
-            chat_id, proposer_id, proposer_name, target_id = request
-            
-            if call.from_user.id != target_id:
-                bot.answer_callback_query(call.id, "❌ Это не твой запрос")
-                return
-            
-            if action == "agree":
-                register_marriage(chat_id, proposer_id, target_id)
-                text = f"💍 Брак заключен! Поздравляем!"
-                bot.answer_callback_query(call.id, "✅ Поздравляем!")
-            else:
-                text = f"💔 Предложение отклонено"
-                bot.answer_callback_query(call.id, "❌ Отказ")
-            
-            delete_marriage_request(request_id)
-            bot.edit_message_text(
-                text,
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode='HTML'
-            )
-
-########## ОБРАБОТЧИКИ НАСТРОЕК ##########
-def set_welcome_message(message):
-    if message.text == '/cancel':
-        bot.reply_to(message, "❌ Отменено")
-        return
-    
-    settings = get_chat_settings(message.chat.id)
-    settings['welcome_message'] = message.text
-    save_chat_settings(message.chat.id, settings)
-    bot.reply_to(message, "✅ Приветствие сохранено!")
-
-def set_rules(message):
-    if message.text == '/cancel':
-        bot.reply_to(message, "❌ Отменено")
-        return
-    
-    settings = get_chat_settings(message.chat.id)
-    settings['rules'] = message.text
-    save_chat_settings(message.chat.id, settings)
-    bot.reply_to(message, "✅ Правила сохранены!")
-
-def process_broadcast(message):
-    if message.text == '/cancel':
-        bot.reply_to(message, "❌ Отменено")
-        return
-    
-    lines = message.text.split('\n', 1)
-    try:
-        delay = int(lines[0].strip())
-        if delay < 1 or delay > 60:
-            bot.reply_to(message, "❌ Задержка должна быть от 1 до 60 секунд")
-            return
-    except:
-        bot.reply_to(message, "❌ Первая строка должна быть числом (задержка в секундах)")
-        return
-    
-    if len(lines) < 2:
-        bot.reply_to(message, "❌ Нет текста для рассылки")
-        return
-    
-    broadcast_text = lines[1]
-    
-    chats = get_all_chats()
-    sent = 0
-    failed = 0
-    
-    bot.reply_to(message, f"📢 Начинаю рассылку в {len(chats)} чатов с задержкой {delay} сек...")
-    
-    for chat_id in chats:
-        try:
-            bot.send_message(int(chat_id), f"📢 <b>РАССЫЛКА</b>\n\n{broadcast_text}", parse_mode='HTML')
-            sent += 1
-            time.sleep(delay)
-        except Exception as e:
-            failed += 1
-            print(f"Ошибка рассылки в {chat_id}: {e}")
-    
-    bot.send_message(message.chat.id, f"✅ Рассылка завершена!\nОтправлено: {sent}\nОшибок: {failed}")
-
-########## ОБРАБОТЧИК ПЛАТЕЖЕЙ ##########
-@bot.pre_checkout_query_handler(func=lambda query: True)
-def pre_checkout_query(pre_checkout_q):
-    bot.answer_pre_checkout_query(pre_checkout_q.id, ok=True)
-
-@bot.message_handler(content_types=['successful_payment'])
-def successful_payment(message):
-    payload = message.successful_payment.invoice_payload
-    parts = payload.split('_')
-    
-    if len(parts) >= 4:
-        days = int(parts[2])
-        stars = int(parts[3])
-        sub_type = 'premium' if days < 365 else 'vip'
-        
-        set_user_subscription(message.from_user.id, sub_type, days, stars)
-        
-        bot.send_message(
-            message.chat.id,
-            f"✅ <b>Спасибо за покупку!</b>\n\n"
-            f"Премиум активирован на {days} дней!\n"
-            f"Тебе доступны все RP-команды без лимитов.",
-            parse_mode='HTML'
-        )
-
-########## НОВЫЕ УЧАСТНИКИ ##########
+########## НОВЫЙ УЧАСТНИК ##########
 @bot.message_handler(content_types=['new_chat_members'])
-def handle_new_member(message):
-    for user in message.new_chat_members:
-        if user.id == bot.get_me().id:
-            continue
-        
-        settings = get_chat_settings(message.chat.id)
-        
-        if settings.get('welcome_message'):
-            welcome = settings['welcome_message'].replace('{user}', user.first_name)
-            bot.send_message(message.chat.id, welcome)
-        
-        if settings.get('captcha_enabled'):
-            code = create_captcha(user.id, message.chat.id)
-            bot.send_message(
-                message.chat.id,
-                f"🔐 Привет, {user.first_name}!\n"
-                f"Введи код для подтверждения: <code>{code}</code>",
-                parse_mode='HTML'
-            )
-            
+def on_new_member(message):
+    for u in message.new_chat_members:
+        if u.id == bot.get_me().id:
+            add_chat(message.chat.id, message.chat.title)
+            bot.send_message(message.chat.id, "🍬 Всем привет! Я Барбариска")
+        else:
+            s = get_settings(message.chat.id)
+            if s['welcome']:
+                bot.send_message(message.chat.id, s['welcome'].replace('{user}', u.first_name))
+            if s['captcha']:
+                code = ''.join(random.choices('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', k=4))
+                add_captcha(u.id, message.chat.id, code)
+                bot.send_message(message.chat.id, f"🔐 {u.first_name}, введи код: {code}")
+                try:
+                    bot.restrict_chat_member(message.chat.id, u.id, can_send_messages=False)
+                except:
+                    pass
+
+########## CALLBACK ##########
+@bot.callback_query_handler(func=lambda c: True)
+def on_callback(c):
+    if c.data == "main_menu":
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("📋 Команды", callback_data="help"),
+            types.InlineKeyboardButton("💎 Премиум", callback_data="premium"),
+            types.InlineKeyboardButton("🛡️ Модерация", callback_data="mod_help"),
+            types.InlineKeyboardButton("💕 RP", callback_data="rp_help"),
+            types.InlineKeyboardButton("⚙️ Админ", callback_data="admin")
+        )
+        bot.edit_message_text("🍬 <b>Барбариска Бот</b>\n\nВыбери действие:", 
+                              c.message.chat.id, c.message.message_id, parse_mode='HTML', reply_markup=markup)
+    
+    elif c.data == "help":
+        bot.answer_callback_query(c.id)
+        cmd_help(c.message)
+    
+    elif c.data == "mod_help":
+        bot.answer_callback_query(c.id)
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🏠 Главное", callback_data="main_menu"))
+        bot.edit_message_text(
+            "🛡️ <b>Модерация</b>\n\n• Бан @user\n• Кик @user\n• Мут 15м\n• Размут\n• Варн\n• +чат / -чат",
+            c.message.chat.id, c.message.message_id, parse_mode='HTML', reply_markup=markup)
+    
+    elif c.data == "rp_help":
+        bot.answer_callback_query(c.id)
+        cmds = list(rp_data.keys())[:20]
+        text = "💕 <b>RP команды</b>\n\n" + "\n".join([f"• {x}" for x in cmds])
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🏠 Главное", callback_data="main_menu"))
+        bot.edit_message_text(text, c.message.chat.id, c.message.message_id, parse_mode='HTML', reply_markup=markup)
+    
+    elif c.data == "premium":
+        bot.answer_callback_query(c.id)
+        cmd_premium(c.message)
+    
+    elif c.data == "admin":
+        bot.answer_callback_query(c.id)
+        if not have_rights(c.message):
+            bot.answer_callback_query(c.id, "❌ Только админ!")
+            return
+        cmd_admin(c.message)
+    
+    elif c.data == "admin_settings":
+        if not have_rights(c.message):
+            bot.answer_callback_query(c.id, "❌ Только админ!")
+            return
+        s = get_settings(c.message.chat.id)
+        text = f"⚙️ <b>Настройки</b>\n\nАнтимат: {'✅' if s['antiswear'] else '❌'}\nКапча: {'✅' if s['captcha'] else '❌'}"
+        bot.answer_callback_query(c.id)
+        bot.send_message(c.message.chat.id, text, parse_mode='HTML')
+    
+    elif c.data == "admin_broadcast":
+        if not have_rights(c.message):
+            bot.answer_callback_query(c.id, "❌ Только админ!")
+            return
+        bot.answer_callback_query(c.id)
+        msg = bot.send_message(c.message.chat.id, "📢 Введи текст для рассылки:")
+        bot.register_next_step_handler(msg, do_broadcast)
+    
+    elif c.data == "admin_welcome":
+        if not have_rights(c.message):
+            bot.answer_callback_query(c.id, "❌ Только админ!")
+            return
+        bot.answer_callback_query(c.id)
+        msg = bot.send_message(c.message.chat.id, "👋 Введи приветствие (используй {user}):")
+        bot.register_next_step_handler(msg, set_welcome)
+    
+    elif c.data == "admin_antiswear":
+        if not have_rights(c.message):
+            bot.answer_callback_query(c.id, "❌ Только админ!")
+            return
+        s = get_settings(c.message.chat.id)
+        save_settings(c.message.chat.id, antiswear=not s['antiswear'])
+        bot.answer_callback_query(c.id, f"Антимат {'включен' if not s['antiswear'] else 'выключен'}")
+    
+    elif c.data == "admin_captcha":
+        if not have_rights(c.message):
+            bot.answer_callback_query(c.id, "❌ Только админ!")
+            return
+        s = get_settings(c.message.chat.id)
+        save_settings(c.message.chat.id, captcha=not s['captcha'])
+        bot.answer_callback_query(c.id, f"Капча {'включена' if not s['captcha'] else 'выключена'}")
+    
+    elif c.data == "buy_30":
+        bot.answer_callback_query(c.id, "Покупка через Stars...")
+        bot.send_invoice(c.message.chat.id, "Премиум 30 дней", "Безлимитные RP", "premium_30", "", "XTR", [types.LabeledPrice("Премиум", 50)])
+    
+    elif c.data.startswith("marry_"):
+        _, ans, rid = c.data.split('_')
+        req = get_marry_req(rid)
+        if not req:
+            bot.answer_callback_query(c.id, "❌ Запрос устарел")
+            return
+        chat, from_id, from_name, to_id = req
+        if c.from_user.id != to_id:
+            bot.answer_callback_query(c.id, "❌ Не твой запрос")
+            return
+        if ans == "yes":
+            add_marriage(chat, from_id, to_id)
+            bot.edit_message_text(f"💍 Брак заключён!", c.message.chat.id, c.message.message_id)
+            bot.answer_callback_query(c.id, "✅ Поздравляем!")
+        else:
+            bot.edit_message_text(f"💔 Отказ", c.message.chat.id, c.message.message_id)
+            bot.answer_callback_query(c.id, "❌ Отказ")
+        del_marry_req(rid)
+
+########## РАССЫЛКА ##########
+def do_broadcast(message):
+    if not have_rights(message):
+        return
+    text = message.text
+    chats = get_chats()
+    sent = 0
+    for cid in chats:
+        try:
+            bot.send_message(int(cid), f"📢 <b>Рассылка</b>\n\n{text}", parse_mode='HTML')
+            sent += 1
+            time.sleep(1)
+        except:
+            pass
+    bot.reply_to(message, f"✅ Отправлено в {sent} чатов")
+
+def set_welcome(message):
+    if not have_rights(message):
+        return
+    save_settings(message.chat.id, welcome=message.text)
+    bot.reply_to(message, "✅ Приветствие сохранено")
+
+########## АНТИМАТ ##########
+@bot.message_handler(func=lambda m: True)
+def anti_swear(message):
+    if message.chat.type == 'private':
+        return
+    s = get_settings(message.chat.id)
+    if s['antiswear']:
+        bad = ['хуй', 'пизда', 'бля', 'сука', 'ебл', 'нахуй', 'пиздец']
+        if any(x in message.text.lower() for x in bad):
             try:
-                bot.restrict_chat_member(
-                    message.chat.id,
-                    user.id,
-                    can_send_messages=False
-                )
+                bot.delete_message(message.chat.id, message.message_id)
+                bot.send_message(message.chat.id, f"{get_user_link(message.from_user.id, message.chat.id)}, не матерись!", parse_mode='HTML')
+            except:
+                pass
+            return
+    
+    if s['captcha']:
+        if check_captcha(message.from_user.id, message.chat.id, message.text):
+            bot.reply_to(message, "✅ Капча пройдена!")
+            try:
+                bot.restrict_chat_member(message.chat.id, message.from_user.id, can_send_messages=True)
             except:
                 pass
 
-########## АВТОИСПРАВЛЕНИЕ НЕПРАВИЛЬНЫХ КОМАНД ##########
-@bot.message_handler(func=lambda message: True)
-def auto_correct_handler(message):
-    if not message.text or message.chat.type == 'private':
-        return
-    
-    # Пропускаем уже обработанные команды
-    if message.text.startswith('/') or message.text.startswith('!'):
-        return
-    
-    words = message.text.lower().split()
-    if not words:
-        return
-    
-    command = words[0]
-    
-    # Если команда не в списке, проверяем подсказку
-    if command not in ALL_COMMANDS:
-        suggested = suggest_command(command)
-        if suggested and suggested != command:
-            markup = types.InlineKeyboardMarkup()
-            markup.add(
-                types.InlineKeyboardButton(f"✅ Выполнить: {suggested}", callback_data=f"do_{suggested}")
-            )
-            bot.reply_to(
-                message,
-                f"🤔 Возможно, ты имел в виду: <code>{suggested}</code>",
-                parse_mode='HTML',
-                reply_markup=markup
-            )
-            return
-
-########## ОБРАБОТЧИК ТЕКСТА ##########
-@bot.message_handler(func=lambda message: True)
-def handle_text(message):
-    if not message.text or message.chat.type == 'private':
-        return
-    
-    increment_message_count(message.chat.id, message.from_user.id)
-    
-    settings = get_chat_settings(message.chat.id)
-    
-    # Проверка капчи
-    if settings.get('captcha_enabled'):
-        conn = sqlite3.connect('bot_data.db')
-        cursor = conn.cursor()
-        cursor.execute('SELECT 1 FROM captcha WHERE user_id = ? AND chat_id = ?', 
-                      (message.from_user.id, message.chat.id))
-        if cursor.fetchone():
-            conn.close()
-            if check_captcha(message.from_user.id, message.chat.id, message.text):
-                bot.reply_to(message, "✅ Капча пройдена! Добро пожаловать!")
-                try:
-                    bot.restrict_chat_member(
-                        message.chat.id,
-                        message.from_user.id,
-                        can_send_messages=True,
-                        can_send_media_messages=True,
-                        can_send_other_messages=True
-                    )
-                except:
-                    pass
-            else:
-                bot.reply_to(message, "❌ Неправильный код. Попробуй ещё раз.")
-            return
-        conn.close()
-    
-    # Антимат
-    if settings.get('anti_swear'):
-        bad_words = ['хуй', 'пизда', 'бля', 'сука', 'ебл', 'нахуй', 'пиздец', 'ебать']
-        text_lower = message.text.lower()
-        for word in bad_words:
-            if word in text_lower:
-                try:
-                    bot.delete_message(message.chat.id, message.message_id)
-                    bot.send_message(
-                        message.chat.id,
-                        f"{get_user_link_sync(message.from_user.id, message.chat.id)}, не матерись пожалуйста! 🙏",
-                        parse_mode='HTML'
-                    )
-                except:
-                    pass
-                return
-
 ########## ЗАПУСК ##########
 if __name__ == "__main__":
-    print("🚀 БОТ ЗАПУЩЕН!")
-    print("✅ RP команд:", len(rp_data))
-    print("✅ Реагирует только на команды")
-    print("✅ Автоисправление работает")
-    print("✅ Мут через @юзера работает")
-    print("✅ Админ панель защищена")
-    try:
-        bot.infinity_polling(timeout=60, long_polling_timeout=60)
-    except Exception as e:
-        print(f"❌ Ошибка: {e}")
-        time.sleep(5)
+    bot.remove_webhook()
+    time.sleep(1)
+    print("🚀 Бот работает...")
+    bot.infinity_polling()
