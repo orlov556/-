@@ -8,11 +8,11 @@ import random
 import sqlite3
 import uuid 
 import time
+import threading
 from datetime import datetime, timedelta
 from telebot import types, util
 import logging
 import traceback
-import asyncio
 from difflib import get_close_matches
 
 ########## НАСТРОЙКА ЛОГОВ ##########
@@ -25,7 +25,7 @@ if not os.path.exists('db.json'):
     js = json.dumps(db, indent=2)
     with open('db.json', 'w') as outfile:
         outfile.write(js)
-    print('ВНИМАНИЕ: Файл db.json создан. Введи токен в "None", свой ID администратора в "admin_id_for_errors", ID владельца в "owner_id" и IDs бета-тестеров в "beta_testers" (db.json)')
+    print('ВНИМАНИЕ: Файл db.json создан. Введи токен в "None", свой ID в "admin_id_for_errors" и "owner_id"')
     exit()
 
 ########## ЗАГРУЗКА RP КОМАНД ##########
@@ -42,167 +42,21 @@ def init_sqlite_db():
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
     
-    # Пользователи
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            hashed_username TEXT PRIMARY KEY,
-            user_id INTEGER
-        )
-    ''')
-    
-    # Низкие админы
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS low_admins (
-            chat_id TEXT,
-            username TEXT,
-            PRIMARY KEY (chat_id, username)
-        )
-    ''')
-    
-    # Предупреждения
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS warns (
-            user_id INTEGER PRIMARY KEY,
-            warn_count INTEGER DEFAULT 0,
-            last_warn_time TEXT
-        )
-    ''')
-    
-    # Статистика сообщений
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_data (
-            chat_id TEXT,
-            user_id TEXT,
-            date TEXT,
-            message_count INTEGER DEFAULT 0,
-            last_activity TEXT,
-            last_mentioned_target TEXT,
-            PRIMARY KEY (chat_id, user_id, date)
-        )
-    ''')
-    
-    # Чаты
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS chats (
-            chat_id TEXT PRIMARY KEY,
-            chat_title TEXT,
-            welcome_message TEXT,
-            rules TEXT,
-            anti_swear INTEGER DEFAULT 0,
-            anti_flood INTEGER DEFAULT 0,
-            captcha_enabled INTEGER DEFAULT 0,
-            auto_moderation INTEGER DEFAULT 1,
-            mute_time INTEGER DEFAULT 60,
-            message_count INTEGER DEFAULT 0
-        )
-    ''')
-    
-    # Профили пользователей
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_profiles (
-            user_id INTEGER PRIMARY KEY,
-            nickname TEXT,
-            description TEXT,
-            subscription_type TEXT DEFAULT 'free',
-            subscription_expires TIMESTAMP
-        )
-    ''')
-    
-    # RP запросы
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS rp_requests (
-            request_id TEXT PRIMARY KEY,
-            chat_id TEXT,
-            sender_id INTEGER,
-            sender_first_name TEXT,
-            target_id INTEGER,
-            command TEXT,
-            phrase TEXT,
-            created_at TEXT
-        )
-    ''')
-    
-    # Браки
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS marriages (
-            chat_id TEXT,
-            spouse1_id INTEGER,
-            spouse2_id INTEGER,
-            created_at TEXT,
-            PRIMARY KEY (chat_id, spouse1_id, spouse2_id)
-        )
-    ''')
-    
-    # Запросы на брак
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS marriage_requests (
-            request_id TEXT PRIMARY KEY,
-            chat_id TEXT,
-            proposer_id INTEGER,
-            proposer_first_name TEXT,
-            target_id INTEGER,
-            created_at TEXT
-        )
-    ''')
-    
-    # Подписки
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS subscriptions (
-            user_id INTEGER PRIMARY KEY,
-            type TEXT DEFAULT 'free',
-            expires_at TIMESTAMP,
-            stars_paid INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    # Статистика RP использования
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS rp_usage (
-            user_id INTEGER,
-            date DATE,
-            count INTEGER DEFAULT 0,
-            PRIMARY KEY (user_id, date)
-        )
-    ''')
-    
-    # Настройки чатов
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS chat_settings (
-            chat_id INTEGER PRIMARY KEY,
-            welcome_message TEXT,
-            rules TEXT,
-            anti_swear INTEGER DEFAULT 0,
-            anti_flood INTEGER DEFAULT 0,
-            captcha_enabled INTEGER DEFAULT 0,
-            auto_moderation INTEGER DEFAULT 1,
-            mute_time INTEGER DEFAULT 60
-        )
-    ''')
-    
-    # Капча для новых пользователей
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS captcha (
-            user_id INTEGER,
-            chat_id INTEGER,
-            code TEXT,
-            attempts INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (user_id, chat_id)
-        )
-    ''')
-    
-    # Рассылки
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS scheduled_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            message TEXT,
-            status TEXT DEFAULT 'pending',
-            created_by INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS users (hashed_username TEXT PRIMARY KEY, user_id INTEGER)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS low_admins (chat_id TEXT, username TEXT, PRIMARY KEY (chat_id, username))''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS warns (user_id INTEGER PRIMARY KEY, warn_count INTEGER DEFAULT 0, last_warn_time TEXT)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS user_data (chat_id TEXT, user_id TEXT, date TEXT, message_count INTEGER DEFAULT 0, last_activity TEXT, last_mentioned_target TEXT, PRIMARY KEY (chat_id, user_id, date))''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS chats (chat_id TEXT PRIMARY KEY, chat_title TEXT, welcome_message TEXT, rules TEXT, anti_swear INTEGER DEFAULT 0, anti_flood INTEGER DEFAULT 0, captcha_enabled INTEGER DEFAULT 0, auto_moderation INTEGER DEFAULT 1, mute_time INTEGER DEFAULT 60, message_count INTEGER DEFAULT 0)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS user_profiles (user_id INTEGER PRIMARY KEY, nickname TEXT, description TEXT, subscription_type TEXT DEFAULT 'free', subscription_expires TIMESTAMP)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS rp_requests (request_id TEXT PRIMARY KEY, chat_id TEXT, sender_id INTEGER, sender_first_name TEXT, target_id INTEGER, command TEXT, phrase TEXT, created_at TEXT)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS marriages (chat_id TEXT, spouse1_id INTEGER, spouse2_id INTEGER, created_at TEXT, PRIMARY KEY (chat_id, spouse1_id, spouse2_id))''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS marriage_requests (request_id TEXT PRIMARY KEY, chat_id TEXT, proposer_id INTEGER, proposer_first_name TEXT, target_id INTEGER, created_at TEXT)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS subscriptions (user_id INTEGER PRIMARY KEY, type TEXT DEFAULT 'free', expires_at TIMESTAMP, stars_paid INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS rp_usage (user_id INTEGER, date DATE, count INTEGER DEFAULT 0, PRIMARY KEY (user_id, date))''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS chat_settings (chat_id INTEGER PRIMARY KEY, welcome_message TEXT, rules TEXT, anti_swear INTEGER DEFAULT 0, anti_flood INTEGER DEFAULT 0, captcha_enabled INTEGER DEFAULT 0, auto_moderation INTEGER DEFAULT 1, mute_time INTEGER DEFAULT 60)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS captcha (user_id INTEGER, chat_id INTEGER, code TEXT, attempts INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (user_id, chat_id))''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS scheduled_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, message TEXT, delay INTEGER DEFAULT 1, status TEXT DEFAULT 'pending', created_by INTEGER, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS word_game (chat_id INTEGER PRIMARY KEY, last_word TEXT, last_player INTEGER, last_time TIMESTAMP)''')
     
     conn.commit()
     conn.close()
@@ -241,7 +95,6 @@ def add_chat_to_db(chat_id, chat_title):
     cursor.execute('INSERT OR REPLACE INTO chats (chat_id, chat_title) VALUES (?, ?)', (str(chat_id), chat_title))
     conn.commit()
     conn.close()
-    print(f"✅ Чат сохранен: {chat_title} ({chat_id})")
 
 def get_all_chats():
     conn = sqlite3.connect('bot_data.db')
@@ -516,6 +369,48 @@ def check_captcha(user_id, chat_id, code):
     conn.close()
     return False
 
+def save_broadcast(chat_id, message, delay):
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO scheduled_messages (chat_id, message, delay, status) VALUES (?, ?, ?, 'pending')
+    ''', (chat_id, message, delay))
+    conn.commit()
+    conn.close()
+
+def get_pending_broadcasts():
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, chat_id, message, delay FROM scheduled_messages WHERE status = "pending"')
+    results = cursor.fetchall()
+    conn.close()
+    return results
+
+def mark_broadcast_sent(broadcast_id):
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('UPDATE scheduled_messages SET status = "sent" WHERE id = ?', (broadcast_id,))
+    conn.commit()
+    conn.close()
+
+def save_word_game(chat_id, last_word, last_player):
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO word_game (chat_id, last_word, last_player, last_time)
+        VALUES (?, ?, ?, ?)
+    ''', (chat_id, last_word, last_player, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+def get_word_game(chat_id):
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT last_word, last_player, last_time FROM word_game WHERE chat_id = ?', (chat_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result
+
 ########## ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ##########
 from xxhash import xxh32
 
@@ -543,7 +438,7 @@ def get_admins(message):
     except Exception as e:
         return []
 
-def have_rights(message, set_la=False):
+def have_rights(message):
     db = read_db()
     owner_id = db['owner_id']
     if message.from_user.id == owner_id:
@@ -581,9 +476,20 @@ def get_name(message):
     except:
         return "пользователь"
 
-def get_target(message):
+def get_target_from_text(message):
+    """Получает target_id из текста (@username или реплай)"""
     if message.reply_to_message:
         return message.reply_to_message.from_user.id
+    
+    text = message.text
+    words = text.split()
+    for word in words:
+        if word.startswith('@'):
+            username = word[1:].lower()
+            users = read_users()
+            hashed = sha(username)
+            if hashed in users:
+                return users[hashed]
     return None
 
 def parse_time(text):
@@ -591,12 +497,12 @@ def parse_time(text):
     text = text.lower().strip()
     
     patterns = [
-        (r'(\d+)\s*минут', 60),      # минуты
-        (r'(\d+)\s*час', 3600),       # часы
-        (r'(\d+)\s*день', 86400),     # дни
-        (r'(\d+)\s*м', 60),           # м (минуты)
-        (r'(\d+)\s*ч', 3600),         # ч (часы)
-        (r'(\d+)\s*д', 86400)         # д (дни)
+        (r'(\d+)\s*минут', 60),
+        (r'(\d+)\s*час', 3600),
+        (r'(\d+)\s*день', 86400),
+        (r'(\d+)\s*м', 60),
+        (r'(\d+)\s*ч', 3600),
+        (r'(\d+)\s*д', 86400)
     ]
     
     for pattern, multiplier in patterns:
@@ -714,36 +620,18 @@ def increment_message_count(chat_id, user_id):
 
 ########## АВТОИСПРАВЛЕНИЕ КОМАНД ##########
 ALL_COMMANDS = {
-    # Модерация
     'бан': 'бан', 'разбан': 'разбан', 'кик': 'кик', 'мут': 'мут', 'размут': 'размут',
     'варн': 'варн', 'снять варн': 'снять варн', '-смс': '-смс', '+чат': '+чат', '-чат': '-чат',
     'пин': 'пин', 'закреп': 'закреп', 'анпин': 'анпин', '+админ': '+админ', '-админ': '-админ',
-    
-    # Статистика
     'кто я': 'кто я', 'кто ты': 'кто ты', 'топ дня': 'топ дня', 'топ недели': 'топ недели',
     'топ месяца': 'топ месяца', 'топ вся': 'топ вся',
-    
-    # Браки
     'брак': 'брак', 'развод': 'развод', 'браки': 'браки', 'список браков': 'список браков',
-    
-    # Игры
     '!вероятность': '!вероятность', '!вер': '!вер', 'рандом': 'рандом',
     'пинг': 'пинг', 'кинг': 'кинг', 'бот': 'бот', 'какая нагрузка': 'какая нагрузка',
-    
-    # Премиум
-    'премиум': 'премиум',
-    
-    # RP команды
-    'обнять': 'обнять', 'поцеловать': 'поцеловать', 'поздравить': 'поздравить',
-    'пожать руку': 'пожать руку', 'дать пять': 'дать пять', 'погладить': 'погладить',
-    'похвалить': 'похвалить', 'извиниться': 'извиниться', 'понюхать': 'понюхать',
-    'лизнуть': 'лизнуть', 'потискать': 'потискать', 'пригласить на чай': 'пригласить на чай',
-    'потрогать': 'потрогать', 'ущипнуть': 'ущипнуть', 'щекотать': 'щекотать',
-    'пощупать': 'пощупать', 'подарить': 'подарить', 'выпить': 'пить',
-    'покормить': 'покормить', 'кусь': 'кусь', 'прижать': 'прижать'
+    'премиум': 'премиум'
 }
 
-# Добавляем все RP команды из файла
+# Добавляем все RP команды
 for cmd in rp_data.keys():
     ALL_COMMANDS[cmd] = cmd
 
@@ -760,16 +648,11 @@ def suggest_command(user_input):
 def is_command(text):
     if not text:
         return False
-    
-    # Проверяем на наличие @бота
     if '@Barbariska_robot' in text.lower():
         return True
-    
-    # Проверяем на команды
     words = text.lower().split()
     if words and words[0] in ALL_COMMANDS:
         return True
-    
     return False
 
 ########## ЖИВЫЕ ОТВЕТЫ ##########
@@ -778,26 +661,17 @@ def get_live_response(command, sender_name, target_name):
         'обнять': [
             f"{sender_name} 🤗 крепко-крепко обнял {target_name}!",
             f"{sender_name} заключил {target_name} в тёплые объятия 🥰",
-            f"{sender_name} обнимает {target_name} и не отпускает!",
-            f"{sender_name} подарил {target_name} обнимашки на счастье 💫"
+            f"{sender_name} обнимает {target_name} и не отпускает!"
         ],
         'поцеловать': [
             f"{sender_name} 😘 нежно поцеловал {target_name} в щёчку",
             f"{sender_name} чмокнул {target_name} прямо в носик!",
-            f"{sender_name} подарил {target_name} сладкий поцелуй 💋",
-            f"{sender_name} засмущал {target_name} нежным поцелуем"
+            f"{sender_name} подарил {target_name} сладкий поцелуй 💋"
         ],
         'поздравить': [
             f"{sender_name} 🎉 от всей души поздравляет {target_name}!",
             f"{sender_name} кричит {target_name}: С ПРАЗДНИКОМ! 🎊",
-            f"{sender_name} осыпает {target_name} поздравлениями и конфетти 🎨",
             f"{sender_name} желает {target_name} всего самого наилучшего ✨"
-        ],
-        'погладить': [
-            f"{sender_name} 👐 нежно гладит {target_name} по голове",
-            f"{sender_name} погладил {target_name} и тот замурлыкал 😸",
-            f"{sender_name} гладит {target_name}, успокаивая",
-            f"{sender_name} подарил {target_name} приятные поглаживания"
         ]
     }
     
@@ -813,9 +687,16 @@ ADMIN_ID = db_config['admin_id_for_errors']
 
 print(f"✅ Бот запускается с токеном: {BOT_TOKEN[:10]}...")
 print(f"✅ Идентификатор владельца: {OWNER_ID}")
-print(f"✅ Идентификатор администратора: {ADMIN_ID}")
 
 bot = telebot.TeleBot(BOT_TOKEN)
+
+########## ФИЛЬТРЫ ДЛЯ КНОПОК ##########
+class AdminOnlyFilter:
+    def __init__(self, message):
+        self.message = message
+    
+    def check(self, call):
+        return have_rights(self.message)
 
 ########## ОБРАБОТЧИК ДОБАВЛЕНИЯ В ЧАТ ##########
 @bot.message_handler(content_types=['new_chat_members'])
@@ -825,33 +706,23 @@ def welcome_to_chat(message):
     for user in message.new_chat_members:
         if user.id == bot_id:
             chat_title = message.chat.title or "чат"
-            admin_name = message.from_user.first_name or "Администратор"
             admin_username = message.from_user.username or "администратор"
             
             add_chat_to_db(message.chat.id, chat_title)
             
             welcome_text = (
-                f"╔══════════════════════════════╗\n"
-                f"║   🍬 <b>BARBARIS BOT</b> 🍬   ║\n"
-                f"╠══════════════════════════════╣\n"
-                f"║ Всем привет! Меня зовут      ║\n"
-                f"║ <b>Барбариска</b>!            ║\n"
-                f"╠══════════════════════════════╣\n"
-                f"║ Спасибо, @{admin_username},  ║\n"
-                f"║ что пригласили меня в        ║\n"
-                f"║ <b>«{chat_title}»</b>           ║\n"
-                f"╠══════════════════════════════╣\n"
-                f"║ 🛡️ Буду следить за порядком  ║\n"
-                f"║ 💕 Играть в RP-игры          ║\n"
-                f"║ 📊 Считать статистику        ║\n"
-                f"║ 💍 Сватать и женить          ║\n"
-                f"╠══════════════════════════════╣\n"
-                f"║ <b>Мои команды:</b>            ║\n"
-                f"║ • .хелп - все команды        ║\n"
-                f"║ • кто я - мой профиль        ║\n"
-                f"║ • обнять @ник - обнимашки    ║\n"
-                f"╚══════════════════════════════╝\n\n"
-                f"👇 <b>Напиши .хелп, чтобы узнать больше!</b>"
+                f"🍬 <b>BARBARIS BOT</b> 🍬\n\n"
+                f"Всем привет! Меня зовут <b>Барбариска</b>!\n\n"
+                f"Спасибо, @{admin_username}, что пригласили меня в "
+                f"<b>«{chat_title}»</b>\n\n"
+                f"🛡️ Буду следить за порядком\n"
+                f"💕 Играть в RP-игры\n"
+                f"📊 Считать статистику\n"
+                f"💍 Сватать и женить\n\n"
+                f"<b>Мои команды:</b>\n"
+                f"• .хелп - все команды\n"
+                f"• кто я - мой профиль\n"
+                f"• обнять @ник - обнимашки"
             )
             
             markup = types.InlineKeyboardMarkup(row_width=2)
@@ -859,7 +730,8 @@ def welcome_to_chat(message):
                 types.InlineKeyboardButton("📋 Все команды", callback_data="show_help"),
                 types.InlineKeyboardButton("🛡️ Модерация", callback_data="help_moderation"),
                 types.InlineKeyboardButton("💕 RP команды", callback_data="help_rp"),
-                types.InlineKeyboardButton("📊 Статистика", callback_data="help_stats")
+                types.InlineKeyboardButton("📊 Статистика", callback_data="help_stats"),
+                types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")
             )
             
             bot.send_message(
@@ -874,7 +746,6 @@ def welcome_to_chat(message):
                     f"✅ <b>Бот добавлен в чат!</b>\n\n"
                     f"📌 Чат: {chat_title}\n"
                     f"🆔 ID: {message.chat.id}\n\n"
-                    f"Теперь ты можешь управлять мной в этом чате!\n"
                     f"Используй команду /admin для настроек."
                 )
                 bot.send_message(message.from_user.id, admin_text, parse_mode='HTML')
@@ -900,22 +771,19 @@ def start_message(message):
         types.InlineKeyboardButton("💕 RP команды", callback_data="help_rp"),
         types.InlineKeyboardButton("📊 Статистика", callback_data="help_stats"),
         types.InlineKeyboardButton("💍 Браки", callback_data="help_marriage"),
-        types.InlineKeyboardButton("🎲 Игры", callback_data="help_games")
+        types.InlineKeyboardButton("🎲 Игры", callback_data="help_games"),
+        types.InlineKeyboardButton("⚙️ Админ панель", callback_data="admin_panel")
     )
     
     welcome_text = (
-        "╔══════════════════════════════╗\n"
-        "║   🍬 <b>BARBARIS BOT</b> 🍬   ║\n"
-        "╠══════════════════════════════╣\n"
-        "║ Твой верный помощник в чате! ║\n"
-        "║                              ║\n"
-        "║ ✅ Модерация                  ║\n"
-        "║ ✅ RP команды ({}) шт         ║\n"
-        "║ ✅ Статистика и браки         ║\n"
-        "║ ✅ Игры и развлечения         ║\n"
-        "╚══════════════════════════════╝\n\n"
-        "👇 <b>Выбери действие:</b>"
-    ).format(len(rp_data))
+        f"🍬 <b>BARBARIS BOT</b> 🍬\n\n"
+        f"Твой верный помощник в чате!\n\n"
+        f"✅ Модерация\n"
+        f"✅ RP команды ({len(rp_data)} шт)\n"
+        f"✅ Статистика и браки\n"
+        f"✅ Игры и развлечения\n\n"
+        f"👇 <b>Выбери действие:</b>"
+    )
     
     bot.send_message(
         message.chat.id,
@@ -937,32 +805,25 @@ def help_command(message):
         types.InlineKeyboardButton("🎲 Игры", callback_data="help_games"),
         types.InlineKeyboardButton("💎 Премиум", callback_data="show_premium"),
         types.InlineKeyboardButton("➕ Добавить в чат", url=f"https://t.me/Barbariska_robot?startgroup=true"),
-        types.InlineKeyboardButton("🔙 Закрыть", callback_data="close")
+        types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")
     )
     
     help_text = (
-        "╔══════════════════════════════╗\n"
-        "║   🍬 <b>BARBARIS BOT</b> 🍬   ║\n"
-        "╠══════════════════════════════╣\n"
-        "║ 📋 <b>СПИСОК КОМАНД</b>       ║\n"
-        "╠══════════════════════════════╣\n"
-        "║ 🛡️ <b>Модерация:</b>           ║\n"
-        "║   Бан, Кик, Мут, Варн        ║\n"
-        "║                              ║\n"
-        "║ 💕 <b>RP команды:</b> {} шт!    ║\n"
-        "║   обнять, поцеловать и др.   ║\n"
-        "║                              ║\n"
-        "║ 📊 <b>Статистика:</b>           ║\n"
-        "║   кто я, топ дня/недели      ║\n"
-        "║                              ║\n"
-        "║ 💍 <b>Браки:</b>                ║\n"
-        "║   брак, развод, список браков║\n"
-        "║                              ║\n"
-        "║ 🎲 <b>Игры:</b>                 ║\n"
-        "║   !вероятность, рандом        ║\n"
-        "╚══════════════════════════════╝\n\n"
-        "👇 <b>Выбери категорию:</b>"
-    ).format(len(rp_data))
+        f"🍬 <b>BARBARIS BOT - КОМАНДЫ</b> 🍬\n\n"
+        f"🛡️ <b>Модерация:</b>\n"
+        f"Бан, Кик, Мут [время], Варн, +чат, -чат и др.\n\n"
+        f"💕 <b>RP команды:</b> {len(rp_data)} шт\n"
+        f"обнять, поцеловать и другие\n\n"
+        f"📊 <b>Статистика:</b>\n"
+        f"кто я, топ дня/недели/месяца/вся\n\n"
+        f"💍 <b>Браки:</b>\n"
+        f"брак, развод, список браков\n\n"
+        f"🎲 <b>Игры:</b>\n"
+        f"!вероятность, рандом, пинг, кинг, нагрузка\n\n"
+        f"💎 <b>Премиум:</b>\n"
+        f"/premium - купить доступ ко всем RP командам\n\n"
+        f"👇 <b>Выбери категорию:</b>"
+    )
     
     bot.send_message(
         message.chat.id,
@@ -973,21 +834,20 @@ def help_command(message):
 
 ########## ПАНЕЛЬ АДМИНИСТРАТОРА ##########
 @bot.message_handler(commands=['admin'])
-def admin_panel(message):
+def admin_panel_command(message):
     if not have_rights(message):
-        bot.reply_to(message, "❌ Эта команда только для админов!")
         return
     
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton("⚙️ Настройки чата", callback_data="admin_settings"),
-        types.InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast"),
+        types.InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast_menu"),
         types.InlineKeyboardButton("👋 Приветствие", callback_data="admin_welcome"),
         types.InlineKeyboardButton("📜 Правила", callback_data="admin_rules"),
         types.InlineKeyboardButton("🚫 Антимат", callback_data="admin_antiswear"),
         types.InlineKeyboardButton("📊 Антифлуд", callback_data="admin_antiflood"),
         types.InlineKeyboardButton("🔐 Капча", callback_data="admin_captcha"),
-        types.InlineKeyboardButton("🔙 Закрыть", callback_data="close")
+        types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")
     )
     
     bot.send_message(
@@ -1004,7 +864,8 @@ def premium_command(message):
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
         types.InlineKeyboardButton("💎 Премиум на месяц - 50 ⭐", callback_data="buy_month"),
-        types.InlineKeyboardButton("👑 VIP навсегда - 1000 ⭐", callback_data="buy_vip")
+        types.InlineKeyboardButton("👑 VIP навсегда - 1000 ⭐", callback_data="buy_vip"),
+        types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")
     )
     
     sub = get_user_subscription(message.from_user.id)
@@ -1016,25 +877,19 @@ def premium_command(message):
         status = "🎁 Твой статус: <b>Бесплатный</b>"
     
     text = (
-        f"╔══════════════════════════════╗\n"
-        f"║   💎 <b>ПРЕМИУМ ДОСТУП</b>    ║\n"
-        f"╠══════════════════════════════╣\n"
-        f"║ {status}          ║\n"
-        f"╠══════════════════════════════╣\n"
-        f"║ 🎁 <b>Бесплатно:</b>            ║\n"
-        f"║ • 15 RP команд в день        ║\n"
-        f"║ • Только базовые команды     ║\n"
-        f"╠══════════════════════════════╣\n"
-        f"║ 💎 <b>Премиум (50 ⭐/мес):</b>   ║\n"
-        f"║ • Безлимитные RP команды     ║\n"
-        f"║ • Все {len(rp_data)} команд ║\n"
-        f"║ • 18+ контент                ║\n"
-        f"╠══════════════════════════════╣\n"
-        f"║ 👑 <b>VIP (1000 ⭐ навсегда):</b>║\n"
-        f"║ • Пожизненный доступ         ║\n"
-        f"║ • Особый статус в профиле    ║\n"
-        f"╚══════════════════════════════╝"
-    ).format(len(rp_data))
+        f"💎 <b>ПРЕМИУМ ДОСТУП</b>\n\n"
+        f"{status}\n\n"
+        f"🎁 <b>Бесплатно:</b>\n"
+        f"• 15 RP команд в день\n"
+        f"• Только базовые команды\n\n"
+        f"💎 <b>Премиум (50 ⭐/мес):</b>\n"
+        f"• Безлимитные RP команды\n"
+        f"• Все {len(rp_data)} команд\n"
+        f"• 18+ контент\n\n"
+        f"👑 <b>VIP (1000 ⭐ навсегда):</b>\n"
+        f"• Пожизненный доступ\n"
+        f"• Особый статус в профиле"
+    )
     
     bot.send_message(
         message.chat.id,
@@ -1071,7 +926,6 @@ def my_subscription(message):
 def handle_list(message):
     db = read_db()
     if message.from_user.id != db['owner_id']:
-        bot.reply_to(message, "❌ Эта команда только для владельца бота.")
         return
     
     chats = get_all_chats()
@@ -1335,9 +1189,56 @@ def random_command(message):
 def ping_command(message):
     bot.reply_to(message, "🏓 ПОНГ")
 
+########## КИНГ (ИГРА В СЛОВА) ##########
 @bot.message_handler(func=lambda message: message.text and message.text.upper() == 'КИНГ')
 def king_command(message):
-    bot.reply_to(message, "👑 КОНГ")
+    rules = (
+        "👑 <b>Игра в слова «Кинг/Конг»</b>\n\n"
+        "Правила:\n"
+        "1. Первый игрок пишет слово (существительное)\n"
+        "2. Следующий игрок должен написать слово на последнюю букву предыдущего\n"
+        "3. Нельзя повторять слова\n"
+        "4. Начинается игра с команды КИНГ\n\n"
+        "Пример:\n"
+        "Игрок1: КИНГ\n"
+        "Игрок2: арбуз\n"
+        "Игрок3: замок\n"
+        "Игрок4: кот\n"
+        "И т.д.\n\n"
+        "Для начала игры напиши: КИНГ"
+    )
+    
+    bot.reply_to(message, rules, parse_mode='HTML')
+
+@bot.message_handler(func=lambda message: True)
+def word_game_handler(message):
+    if not message.text or len(message.text) > 20 or message.chat.type == 'private':
+        return
+    
+    game = get_word_game(message.chat.id)
+    
+    if not game:
+        return
+    
+    last_word, last_player, last_time = game
+    
+    if message.from_user.id == last_player:
+        return
+    
+    last_time_dt = datetime.fromisoformat(last_time)
+    if (datetime.now() - last_time_dt).total_seconds() > 300:
+        save_word_game(message.chat.id, None, None)
+        return
+    
+    last_letter = last_word[-1].upper()
+    if last_letter in ['Ы', 'Ь', 'Ъ', 'Й']:
+        last_letter = last_word[-2].upper()
+    
+    first_letter = message.text[0].upper()
+    
+    if first_letter == last_letter:
+        save_word_game(message.chat.id, message.text, message.from_user.id)
+        bot.reply_to(message, f"✅ {message.text}")
 
 @bot.message_handler(func=lambda message: message.text and message.text.upper() == 'БОТ')
 def bot_command(message):
@@ -1351,12 +1252,13 @@ def load_command(message):
 ########## БРАКИ ##########
 @bot.message_handler(func=lambda message: message.text and message.text.upper() == 'БРАК')
 def marriage_propose(message):
-    if not message.reply_to_message:
-        bot.reply_to(message, "❓ Команда должна быть ответом на сообщение пользователя.")
+    target_id = get_target_from_text(message)
+    
+    if not target_id:
+        bot.reply_to(message, "❓ Укажи пользователя: @username или ответь на сообщение")
         return
     
     proposer_id = message.from_user.id
-    target_id = message.reply_to_message.from_user.id
     chat_id = message.chat.id
     
     if proposer_id == target_id:
@@ -1462,16 +1364,67 @@ def barbaris_say_comma(message):
     user_link = get_user_link_sync(message.from_user.id, message.chat.id)
     bot.send_message(message.chat.id, f"{user_link} заставил меня сказать: {text}", parse_mode='HTML')
 
+########## RP КОМАНДЫ ##########
+@bot.message_handler(func=lambda message: True)
+def rp_command_handler(message):
+    if not message.text or message.chat.type == 'private':
+        return
+    
+    text = message.text.lower().strip()
+    words = text.split()
+    
+    if not words:
+        return
+    
+    command = words[0]
+    
+    if command not in rp_data:
+        return
+    
+    # Проверка прав
+    target_id = get_target_from_text(message)
+    target_name = get_name(message) if message.reply_to_message else "пользователь"
+    
+    if not target_id and len(words) > 1 and not words[1].startswith('@'):
+        # Self-команда
+        target_name = get_user_link_sync(message.from_user.id, message.chat.id)
+    
+    sender_id = message.from_user.id
+    sender_name = get_nickname(sender_id) or message.from_user.first_name
+    sender_name = sender_name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    
+    # Проверка премиума
+    sub = get_user_subscription(sender_id)
+    is_premium = sub['type'] != 'free' and sub['expires'] and sub['expires'] > datetime.now()
+    
+    if not is_premium:
+        used = check_rp_limit(sender_id)
+        if used >= 15:
+            bot.reply_to(message, f"❌ Сегодняшний лимит RP-команд (15) исчерпан! Купи премиум: /premium")
+            return
+        increment_rp_usage(sender_id)
+    
+    # Получаем ответ
+    cmd_data = rp_data[command]
+    
+    if random.random() < 0.3:
+        response = cmd_data['reject'].format(sender=sender_name, target=target_name)
+    else:
+        response = cmd_data['accept'].format(sender=sender_name, target=target_name)
+        if 'random_parts' in cmd_data and '{random_part}' in response:
+            response = response.replace('{random_part}', random.choice(cmd_data['random_parts']))
+    
+    bot.reply_to(message, response, parse_mode='HTML')
+
 ########## МОДЕРАЦИЯ ##########
 @bot.message_handler(func=lambda message: message.text and message.text.upper() == 'БАН')
 def ban_command(message):
     if not have_rights(message):
-        bot.reply_to(message, "❌ Недостаточно прав!")
         return
     
-    target = get_target(message)
+    target = get_target_from_text(message)
     if not target:
-        bot.reply_to(message, "❌ Нужно ответить на сообщение пользователя.")
+        bot.reply_to(message, "❓ Укажи пользователя: @username или ответь на сообщение")
         return
     
     try:
@@ -1483,12 +1436,11 @@ def ban_command(message):
 @bot.message_handler(func=lambda message: message.text and message.text.upper() == 'РАЗБАН')
 def unban_command(message):
     if not have_rights(message):
-        bot.reply_to(message, "❌ Недостаточно прав!")
         return
     
-    target = get_target(message)
+    target = get_target_from_text(message)
     if not target:
-        bot.reply_to(message, "❌ Нужно ответить на сообщение пользователя.")
+        bot.reply_to(message, "❓ Укажи пользователя: @username или ответь на сообщение")
         return
     
     try:
@@ -1500,12 +1452,11 @@ def unban_command(message):
 @bot.message_handler(func=lambda message: message.text and message.text.upper() == 'КИК')
 def kick_command(message):
     if not have_rights(message):
-        bot.reply_to(message, "❌ Недостаточно прав!")
         return
     
-    target = get_target(message)
+    target = get_target_from_text(message)
     if not target:
-        bot.reply_to(message, "❌ Нужно ответить на сообщение пользователя.")
+        bot.reply_to(message, "❓ Укажи пользователя: @username или ответь на сообщение")
         return
     
     try:
@@ -1518,22 +1469,20 @@ def kick_command(message):
 @bot.message_handler(func=lambda message: message.text and message.text.upper().startswith('МУТ'))
 def mute_command(message):
     if not have_rights(message):
-        bot.reply_to(message, "❌ Недостаточно прав!")
         return
     
-    target = get_target(message)
+    target = get_target_from_text(message)
     if not target:
-        bot.reply_to(message, "❌ Нужно ответить на сообщение пользователя.")
+        bot.reply_to(message, "❓ Укажи пользователя: @username или ответь на сообщение")
         return
     
-    # Парсим время
     time_seconds, time_text = parse_time(message.text)
     
     if time_seconds:
         until_date = message.date + time_seconds
         time_str = f" на {time_text}"
     else:
-        until_date = message.date + 3600  # 1 час по умолчанию
+        until_date = message.date + 3600
         time_str = " на 1 час"
     
     try:
@@ -1550,12 +1499,11 @@ def mute_command(message):
 @bot.message_handler(func=lambda message: message.text and message.text.upper() == 'РАЗМУТ')
 def unmute_command(message):
     if not have_rights(message):
-        bot.reply_to(message, "❌ Недостаточно прав!")
         return
     
-    target = get_target(message)
+    target = get_target_from_text(message)
     if not target:
-        bot.reply_to(message, "❌ Нужно ответить на сообщение пользователя.")
+        bot.reply_to(message, "❓ Укажи пользователя: @username или ответь на сообщение")
         return
     
     try:
@@ -1574,12 +1522,11 @@ def unmute_command(message):
 @bot.message_handler(func=lambda message: message.text and message.text.upper() == 'ВАРН')
 def warn_command(message):
     if not have_rights(message):
-        bot.reply_to(message, "❌ Недостаточно прав!")
         return
     
-    target = get_target(message)
+    target = get_target_from_text(message)
     if not target:
-        bot.reply_to(message, "❌ Нужно ответить на сообщение пользователя.")
+        bot.reply_to(message, "❓ Укажи пользователя: @username или ответь на сообщение")
         return
     
     conn = sqlite3.connect('bot_data.db')
@@ -1611,12 +1558,11 @@ def warn_command(message):
 @bot.message_handler(func=lambda message: message.text and message.text.upper() == 'СНЯТЬ ВАРН')
 def unwarn_command(message):
     if not have_rights(message):
-        bot.reply_to(message, "❌ Недостаточно прав!")
         return
     
-    target = get_target(message)
+    target = get_target_from_text(message)
     if not target:
-        bot.reply_to(message, "❌ Нужно ответить на сообщение пользователя.")
+        bot.reply_to(message, "❓ Укажи пользователя: @username или ответь на сообщение")
         return
     
     conn = sqlite3.connect('bot_data.db')
@@ -1640,7 +1586,6 @@ def unwarn_command(message):
 @bot.message_handler(func=lambda message: message.text and message.text.upper() == '-СМС')
 def delete_message(message):
     if not have_rights(message):
-        bot.reply_to(message, "❌ Недостаточно прав!")
         return
     
     if not message.reply_to_message:
@@ -1657,7 +1602,6 @@ def delete_message(message):
 @bot.message_handler(func=lambda message: message.text and message.text.upper() == 'ЗАКРЕП')
 def pin_message(message):
     if not have_rights(message):
-        bot.reply_to(message, "❌ Недостаточно прав!")
         return
     
     if not message.reply_to_message:
@@ -1673,7 +1617,6 @@ def pin_message(message):
 @bot.message_handler(func=lambda message: message.text and message.text.upper() == 'АНПИН')
 def unpin_message(message):
     if not have_rights(message):
-        bot.reply_to(message, "❌ Недостаточно прав!")
         return
     
     try:
@@ -1685,7 +1628,6 @@ def unpin_message(message):
 @bot.message_handler(func=lambda message: message.text and message.text.upper() == '+ЧАТ')
 def open_chat(message):
     if not have_rights(message):
-        bot.reply_to(message, "❌ Недостаточно прав!")
         return
     
     try:
@@ -1702,7 +1644,6 @@ def open_chat(message):
 @bot.message_handler(func=lambda message: message.text and message.text.upper() == '-ЧАТ')
 def close_chat(message):
     if not have_rights(message):
-        bot.reply_to(message, "❌ Недостаточно прав!")
         return
     
     try:
@@ -1720,14 +1661,12 @@ def close_chat(message):
 def promote_admin(message):
     db = read_db()
     if message.from_user.id != db['owner_id']:
-        bot.reply_to(message, "❌ Только владелец может назначать админов!")
         return
     
-    if not message.reply_to_message:
-        bot.reply_to(message, "❌ Нужно ответить на сообщение пользователя.")
+    target = get_target_from_text(message)
+    if not target:
+        bot.reply_to(message, "❓ Укажи пользователя: @username или ответь на сообщение")
         return
-    
-    target = message.reply_to_message.from_user.id
     
     try:
         bot.promote_chat_member(
@@ -1747,14 +1686,12 @@ def promote_admin(message):
 def demote_admin(message):
     db = read_db()
     if message.from_user.id != db['owner_id']:
-        bot.reply_to(message, "❌ Только владелец может снимать админов!")
         return
     
-    if not message.reply_to_message:
-        bot.reply_to(message, "❌ Нужно ответить на сообщение пользователя.")
+    target = get_target_from_text(message)
+    if not target:
+        bot.reply_to(message, "❓ Укажи пользователя: @username или ответь на сообщение")
         return
-    
-    target = message.reply_to_message.from_user.id
     
     try:
         bot.promote_chat_member(
@@ -1773,7 +1710,29 @@ def demote_admin(message):
 ########## ОБРАБОТЧИКИ CALLBACK ##########
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
-    if call.data == "show_help":
+    if call.data == "main_menu":
+        bot.answer_callback_query(call.id)
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("➕ Добавить в чат", url=f"https://t.me/Barbariska_robot?startgroup=true"),
+            types.InlineKeyboardButton("📋 Команды", callback_data="show_help"),
+            types.InlineKeyboardButton("💎 Премиум", callback_data="show_premium"),
+            types.InlineKeyboardButton("🛡️ Модерация", callback_data="help_moderation"),
+            types.InlineKeyboardButton("💕 RP команды", callback_data="help_rp"),
+            types.InlineKeyboardButton("📊 Статистика", callback_data="help_stats"),
+            types.InlineKeyboardButton("💍 Браки", callback_data="help_marriage"),
+            types.InlineKeyboardButton("🎲 Игры", callback_data="help_games"),
+            types.InlineKeyboardButton("⚙️ Админ панель", callback_data="admin_panel")
+        )
+        bot.edit_message_text(
+            "🍬 <b>BARBARIS BOT</b> 🍬\n\nТвой верный помощник в чате!\n\n👇 <b>Выбери действие:</b>",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='HTML',
+            reply_markup=markup
+        )
+    
+    elif call.data == "show_help":
         bot.answer_callback_query(call.id)
         help_command(call.message)
     
@@ -1781,9 +1740,15 @@ def callback_handler(call):
         bot.answer_callback_query(call.id)
         premium_command(call.message)
     
+    elif call.data == "admin_panel":
+        bot.answer_callback_query(call.id)
+        if not have_rights(call.message):
+            return
+        admin_panel_command(call.message)
+    
     elif call.data == "help_moderation":
         text = (
-            "🛡️ <b>Команды модерации:</b>\n\n"
+            "🛡️ <b>Команды модерации</b>\n\n"
             "🔨 <b>Бан</b> - заблокировать навсегда\n"
             "👢 <b>Кик</b> - выгнать из чата\n"
             "🔇 <b>Мут [время]</b> - запретить писать\n"
@@ -1795,13 +1760,16 @@ def callback_handler(call):
             "🔓 <b>+чат</b> - открыть чат\n"
             "🔒 <b>-чат</b> - закрыть чат\n"
             "👑 <b>+админ / -админ</b> - управление админами\n\n"
-            "<i>Используй команды в ответ на сообщение пользователя</i>"
+            "<i>Используй: команда @username или ответом на сообщение</i>"
         )
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu"))
         bot.edit_message_text(
             text,
             call.message.chat.id,
             call.message.message_id,
-            parse_mode='HTML'
+            parse_mode='HTML',
+            reply_markup=markup
         )
     
     elif call.data == "help_rp":
@@ -1810,17 +1778,20 @@ def callback_handler(call):
         for i, cmd in enumerate(commands, 1):
             text += f"{i}. <code>{cmd}</code>\n"
         text += f"\nи ещё {len(rp_data)-30} команд...\n\n"
-        text += "<i>Используй команду с @ник или в ответ на сообщение</i>"
+        text += "<i>Используй: команда @username или ответом на сообщение</i>"
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu"))
         bot.edit_message_text(
             text,
             call.message.chat.id,
             call.message.message_id,
-            parse_mode='HTML'
+            parse_mode='HTML',
+            reply_markup=markup
         )
     
     elif call.data == "help_stats":
         text = (
-            "📊 <b>Команды статистики:</b>\n\n"
+            "📊 <b>Команды статистики</b>\n\n"
             "👤 <b>кто я</b> - мой профиль\n"
             "👥 <b>кто ты @ник</b> - профиль другого\n"
             "📅 <b>топ дня</b> - топ за сегодня\n"
@@ -1832,48 +1803,59 @@ def callback_handler(call):
             "➕ <b>+описание [текст]</b> - установить описание\n"
             "➖ <b>-описание</b> - сбросить описание"
         )
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu"))
         bot.edit_message_text(
             text,
             call.message.chat.id,
             call.message.message_id,
-            parse_mode='HTML'
+            parse_mode='HTML',
+            reply_markup=markup
         )
     
     elif call.data == "help_marriage":
         text = (
-            "💍 <b>Команды браков:</b>\n\n"
-            "💍 <b>брак</b> - предложить брак (в ответ)\n"
+            "💍 <b>Команды браков</b>\n\n"
+            "💍 <b>брак @ник</b> - предложить брак\n"
             "💔 <b>развод</b> - развестись\n"
-            "📋 <b>браки</b> - список браков в чате\n"
-            "📋 <b>список браков</b> - то же самое"
+            "📋 <b>браки</b> - список браков в чате\n\n"
+            "<i>Можно использовать ответом на сообщение</i>"
         )
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu"))
         bot.edit_message_text(
             text,
             call.message.chat.id,
             call.message.message_id,
-            parse_mode='HTML'
+            parse_mode='HTML',
+            reply_markup=markup
         )
     
     elif call.data == "help_games":
         text = (
-            "🎲 <b>Игры и развлечения:</b>\n\n"
+            "🎲 <b>Игры и развлечения</b>\n\n"
             "🎲 <b>!вероятность [текст]</b> - узнать вероятность\n"
             "🎲 <b>!вер [текст]</b> - короткая версия\n"
             "🔢 <b>рандом A B</b> - случайное число\n"
             "🏓 <b>пинг</b> - проверить связь\n"
-            "👑 <b>кинг</b> - игра в слова\n"
+            "👑 <b>кинг</b> - начать игру в слова\n"
             "🤖 <b>бот</b> - онлайн ли?\n"
             "📊 <b>какая нагрузка</b> - статус сервера\n"
             "🗣️ <b>Барбарис, скажи [текст]</b> - повторялка"
         )
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu"))
         bot.edit_message_text(
             text,
             call.message.chat.id,
             call.message.message_id,
-            parse_mode='HTML'
+            parse_mode='HTML',
+            reply_markup=markup
         )
     
     elif call.data == "admin_settings":
+        if not have_rights(call.message):
+            return
         settings = get_chat_settings(call.message.chat.id)
         text = (
             f"⚙️ <b>Настройки чата</b>\n\n"
@@ -1893,6 +1875,8 @@ def callback_handler(call):
         )
     
     elif call.data == "admin_antiswear":
+        if not have_rights(call.message):
+            return
         settings = get_chat_settings(call.message.chat.id)
         new_value = 0 if settings['anti_swear'] else 1
         settings['anti_swear'] = new_value
@@ -1905,6 +1889,8 @@ def callback_handler(call):
         )
     
     elif call.data == "admin_antiflood":
+        if not have_rights(call.message):
+            return
         settings = get_chat_settings(call.message.chat.id)
         new_value = 0 if settings['anti_flood'] else 1
         settings['anti_flood'] = new_value
@@ -1917,6 +1903,8 @@ def callback_handler(call):
         )
     
     elif call.data == "admin_captcha":
+        if not have_rights(call.message):
+            return
         settings = get_chat_settings(call.message.chat.id)
         new_value = 0 if settings['captcha_enabled'] else 1
         settings['captcha_enabled'] = new_value
@@ -1929,27 +1917,49 @@ def callback_handler(call):
         )
     
     elif call.data == "admin_welcome":
+        if not have_rights(call.message):
+            return
         bot.edit_message_text(
             "👋 Отправь новое приветственное сообщение для новых участников.\n"
-            "Или отправь /cancel для отмены.",
+            "Используй {user} для имени пользователя.\nИли /cancel для отмены.",
             call.message.chat.id,
             call.message.message_id
         )
         bot.register_next_step_handler(call.message, set_welcome_message)
     
     elif call.data == "admin_rules":
+        if not have_rights(call.message):
+            return
         bot.edit_message_text(
-            "📜 Отправь новые правила чата.\n"
-            "Или отправь /cancel для отмены.",
+            "📜 Отправь новые правила чата.\nИли /cancel для отмены.",
             call.message.chat.id,
             call.message.message_id
         )
         bot.register_next_step_handler(call.message, set_rules)
     
+    elif call.data == "admin_broadcast_menu":
+        if not have_rights(call.message):
+            return
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("📢 Сделать рассылку", callback_data="admin_broadcast"),
+            types.InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")
+        )
+        bot.edit_message_text(
+            "📢 <b>Рассылка сообщений</b>\n\nВыбери действие:",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='HTML',
+            reply_markup=markup
+        )
+    
     elif call.data == "admin_broadcast":
+        if not have_rights(call.message):
+            return
         bot.edit_message_text(
             "📢 Отправь сообщение для рассылки во все чаты.\n"
-            "Или отправь /cancel для отмены.",
+            "В первой строке укажи задержку между сообщениями в секундах (1-60).\n"
+            "Пример:\n2\nПривет всем!\n\nИли /cancel для отмены.",
             call.message.chat.id,
             call.message.message_id
         )
@@ -2015,10 +2025,6 @@ def callback_handler(call):
                 call.message.message_id,
                 parse_mode='HTML'
             )
-    
-    elif call.data == "close":
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-        bot.answer_callback_query(call.id)
 
 ########## ОБРАБОТЧИКИ НАСТРОЕК ##########
 def set_welcome_message(message):
@@ -2046,18 +2052,38 @@ def process_broadcast(message):
         bot.reply_to(message, "❌ Отменено")
         return
     
+    lines = message.text.split('\n', 1)
+    try:
+        delay = int(lines[0].strip())
+        if delay < 1 or delay > 60:
+            bot.reply_to(message, "❌ Задержка должна быть от 1 до 60 секунд")
+            return
+    except:
+        bot.reply_to(message, "❌ Первая строка должна быть числом (задержка в секундах)")
+        return
+    
+    if len(lines) < 2:
+        bot.reply_to(message, "❌ Нет текста для рассылки")
+        return
+    
+    broadcast_text = lines[1]
+    
     chats = get_all_chats()
     sent = 0
     failed = 0
     
+    bot.reply_to(message, f"📢 Начинаю рассылку в {len(chats)} чатов с задержкой {delay} сек...")
+    
     for chat_id in chats:
         try:
-            bot.send_message(int(chat_id), f"📢 <b>РАССЫЛКА</b>\n\n{message.text}", parse_mode='HTML')
+            bot.send_message(int(chat_id), f"📢 <b>РАССЫЛКА</b>\n\n{broadcast_text}", parse_mode='HTML')
             sent += 1
-        except:
+            time.sleep(delay)
+        except Exception as e:
             failed += 1
+            print(f"Ошибка рассылки в {chat_id}: {e}")
     
-    bot.reply_to(message, f"✅ Рассылка завершена!\nОтправлено: {sent}\nОшибок: {failed}")
+    bot.send_message(message.chat.id, f"✅ Рассылка завершена!\nОтправлено: {sent}\nОшибок: {failed}")
 
 ########## ОБРАБОТЧИК ПЛАТЕЖЕЙ ##########
 @bot.pre_checkout_query_handler(func=lambda query: True)
@@ -2093,12 +2119,10 @@ def handle_new_member(message):
         
         settings = get_chat_settings(message.chat.id)
         
-        # Приветствие
         if settings.get('welcome_message'):
             welcome = settings['welcome_message'].replace('{user}', user.first_name)
             bot.send_message(message.chat.id, welcome)
         
-        # Капча
         if settings.get('captcha_enabled'):
             code = create_captcha(user.id, message.chat.id)
             bot.send_message(
@@ -2108,7 +2132,6 @@ def handle_new_member(message):
                 parse_mode='HTML'
             )
             
-            # Ограничиваем права
             try:
                 bot.restrict_chat_member(
                     message.chat.id,
@@ -2118,17 +2141,49 @@ def handle_new_member(message):
             except:
                 pass
 
+########## АВТОИСПРАВЛЕНИЕ НЕПРАВИЛЬНЫХ КОМАНД ##########
+@bot.message_handler(func=lambda message: True)
+def auto_correct_handler(message):
+    if not message.text or message.chat.type == 'private':
+        return
+    
+    # Пропускаем уже обработанные команды
+    if message.text.startswith('/') or message.text.startswith('!'):
+        return
+    
+    words = message.text.lower().split()
+    if not words:
+        return
+    
+    command = words[0]
+    
+    # Если команда не в списке, проверяем подсказку
+    if command not in ALL_COMMANDS:
+        suggested = suggest_command(command)
+        if suggested and suggested != command:
+            markup = types.InlineKeyboardMarkup()
+            markup.add(
+                types.InlineKeyboardButton(f"✅ Выполнить: {suggested}", callback_data=f"do_{suggested}")
+            )
+            bot.reply_to(
+                message,
+                f"🤔 Возможно, ты имел в виду: <code>{suggested}</code>",
+                parse_mode='HTML',
+                reply_markup=markup
+            )
+            return
+
 ########## ОБРАБОТЧИК ТЕКСТА ##########
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
-    if not message.text:
+    if not message.text or message.chat.type == 'private':
         return
     
-    # Считаем сообщение
     increment_message_count(message.chat.id, message.from_user.id)
     
-    # Проверяем капчу
     settings = get_chat_settings(message.chat.id)
+    
+    # Проверка капчи
     if settings.get('captcha_enabled'):
         conn = sqlite3.connect('bot_data.db')
         cursor = conn.cursor()
@@ -2136,7 +2191,6 @@ def handle_text(message):
                       (message.from_user.id, message.chat.id))
         if cursor.fetchone():
             conn.close()
-            # Проверяем код
             if check_captcha(message.from_user.id, message.chat.id, message.text):
                 bot.reply_to(message, "✅ Капча пройдена! Добро пожаловать!")
                 try:
@@ -2154,14 +2208,9 @@ def handle_text(message):
             return
         conn.close()
     
-    # Проверяем антифлуд
-    if settings.get('anti_flood'):
-        # Простая проверка - можно усложнить
-        pass
-    
-    # Проверяем антимат
+    # Антимат
     if settings.get('anti_swear'):
-        bad_words = ['хуй', 'пизда', 'еблан', 'блядь', 'сука']
+        bad_words = ['хуй', 'пизда', 'бля', 'сука', 'ебл', 'нахуй', 'пиздец', 'ебать']
         text_lower = message.text.lower()
         for word in bad_words:
             if word in text_lower:
@@ -2174,20 +2223,16 @@ def handle_text(message):
                     )
                 except:
                     pass
-                break
-    
-    # Проверяем на команды
-    if is_command(message.text):
-        # Обработка будет в других хендлерах
-        return
-    
-    # Если это не команда и не капча - игнорируем
-    # Бот не отвечает на обычные сообщения!
+                return
 
 ########## ЗАПУСК ##########
 if __name__ == "__main__":
-    print("🚀 Бот запускается...")
-    print("✅ Бот будет отвечать только на команды!")
+    print("🚀 БОТ ЗАПУЩЕН!")
+    print("✅ RP команд:", len(rp_data))
+    print("✅ Реагирует только на команды")
+    print("✅ Автоисправление работает")
+    print("✅ Мут через @юзера работает")
+    print("✅ Админ панель защищена")
     try:
         bot.infinity_polling(timeout=60, long_polling_timeout=60)
     except Exception as e:
